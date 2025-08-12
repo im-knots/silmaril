@@ -1,0 +1,24 @@
+{
+  "name": "silmaril/managed-model",
+  "version": "v1.0.0",
+  "description": "A test model that is already managed by Silmaril",
+  "license": "MIT",
+  "created_at": "2024-01-01T00:00:00Z",
+  "architecture": "TestArchitecture",
+  "model_type": "test",
+  "parameters": 5000,
+  "inference_hints": {
+    "min_ram_gb": 1,
+    "min_vram_gb": 0,
+    "context_length": 1024
+  },
+  "total_size": 150,
+  "files": [
+    {
+      "path": "model.bin",
+      "size": 150,
+      "sha256": "test-hash-abc123"
+    }
+  ],
+  "magnet_uri": "magnet:?xt=urn:btih:testhashtesthashtesthash&dn=silmaril/managed-model"
+}

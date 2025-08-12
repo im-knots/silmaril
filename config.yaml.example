@@ -1,0 +1,53 @@
+# Silmaril Configuration File
+# Copy this to config.yaml and customize as needed
+
+# Storage configuration
+storage:
+  # Base directory for all Silmaril data
+  # Default: ~/.silmaril
+  base_dir: ~/.silmaril
+  
+  # Individual directories (leave empty to use defaults under base_dir)
+  models_dir: ""      # Default: base_dir/models
+  torrents_dir: ""    # Default: base_dir/torrents
+  registry_dir: ""    # Default: base_dir/registry
+  db_dir: ""          # Default: base_dir/db
+
+# Network configuration
+network:
+  # DHT (Distributed Hash Table) settings
+  dht_enabled: true
+  dht_bootstrap_nodes:
+    - "router.bittorrent.com:6881"
+    - "dht.transmissionbt.com:6881"
+    - "router.utorrent.com:6881"
+  dht_port: 0  # 0 = random port
+  
+  # BitTorrent network settings
+  listen_port: 0          # 0 = random port
+  max_connections: 100
+  upload_rate_limit: 0    # bytes/sec, 0 = unlimited
+  download_rate_limit: 0  # bytes/sec, 0 = unlimited
+  
+  # We use DHT only, no trackers
+  disable_trackers: true
+
+# Torrent configuration
+torrent:
+  piece_length: 4194304   # 4MB pieces
+  seed_ratio: 0           # 0 = unlimited
+  seed_time: 0            # seconds, 0 = unlimited
+  download_timeout: 1800  # 30 minutes
+
+# UI configuration
+ui:
+  progress_bar: true
+  color: true
+  verbose: false
+  output_format: text  # text or json
+
+# Security configuration
+security:
+  sign_manifests: true
+  verify_manifests: true
+  keys_dir: ""  # Default: base_dir/keys
