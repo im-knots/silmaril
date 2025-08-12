@@ -74,13 +74,15 @@ The model will be downloaded to `~/.silmaril/models/` by default.
 
 ### 3. Mirror from HuggingFace
 
-Clone a model directly from HuggingFace and share it on the P2P network:
+Clone a model directly from HuggingFace and automatically share it on the P2P network:
 
 ```bash
 silmaril mirror https://huggingface.co/mistralai/Mistral-7B-v0.1
 # or simply:
 silmaril mirror mistralai/Mistral-7B-v0.1
 ```
+
+The model will be automatically seeded after mirroring. Use `--no-auto-share` to disable this.
 
 ### 4. Share Your Models
 
@@ -90,10 +92,16 @@ Seed all your downloaded models to help others:
 silmaril share --all
 ```
 
-Or share a specific model:
+Share a specific model by name:
 
 ```bash
-silmaril share ~/.silmaril/models/meta-llama/Llama-3.1-8B
+silmaril share meta-llama/Llama-3.1-8B
+```
+
+Or share/publish a new model from a directory:
+
+```bash
+silmaril share /path/to/model --name org/model --license apache-2.0
 ```
 
 ### 5. List Local Models
@@ -106,10 +114,10 @@ silmaril list
 
 ## Publishing Your Own Models
 
-If you have a model in HuggingFace format, you can publish it to the network:
+If you have a model in HuggingFace format, you can publish it to the network using the share command:
 
 ```bash
-silmaril publish /path/to/your/model \
+silmaril share /path/to/your/model \
   --name "yourorg/yourmodel" \
   --license "apache-2.0" \
   --version "v1.0"
@@ -120,6 +128,7 @@ This will:
 2. Generate a manifest with metadata
 3. Announce the model on the DHT network
 4. Save to your local registry
+5. Start seeding the model immediately
 
 ## Configuration
 
@@ -135,6 +144,8 @@ network:
   upload_rate_limit: 0  # 0 = unlimited
   download_rate_limit: 0
   dht_enabled: true
+  dht_port: 0  # 0 = random port (allows multiple instances)
+  listen_port: 0  # 0 = random port
 
 torrent:
   piece_length: 4194304  # 4MB
@@ -153,9 +164,8 @@ security:
 - `silmaril list` - List locally downloaded models
 - `silmaril discover [model]` - Search for models on the P2P network
 - `silmaril get <model>` - Download a model from the network
-- `silmaril share [path]` - Seed models to help others download
-- `silmaril mirror <repo>` - Clone from HuggingFace and share via P2P
-- `silmaril publish <dir>` - Create and share a new model on the network
+- `silmaril share [model/path]` - Share existing models or publish new ones
+- `silmaril mirror <repo>` - Clone from HuggingFace and auto-share via P2P
 
 ### Registry Management
 
@@ -163,6 +173,11 @@ security:
 - `silmaril registry export <model-name>` - Export a model manifest
 
 ### Command Options
+
+#### init
+- `--path` - Initialize in a custom location
+- `--cleanup` - Remove all Silmaril directories and configuration
+- `--force` - Overwrite existing configuration
 
 #### get
 - `--output, -o` - Specify output directory
@@ -174,13 +189,16 @@ security:
 - `--depth` - Git clone depth (default: 1)
 - `--skip-lfs` - Skip Git LFS files
 - `--no-broadcast` - Don't announce on DHT
+- `--no-auto-share` - Don't automatically start sharing after mirroring
 
-#### publish  
-- `--name` - Model name (required)
-- `--license` - Model license (required)
+#### share
+- `--all` - Share all downloaded models
+- `--name` - Model name (required for publishing new models)
+- `--license` - Model license (required for publishing new models)
 - `--version` - Model version (default: main)
 - `--piece-length` - Torrent piece size (default: 4MB)
 - `--skip-dht` - Skip DHT announcement
+- `--sign` - Sign the manifest (default: true)
 
 ## Architecture
 
@@ -189,10 +207,46 @@ Silmaril uses:
 - **DHT (Distributed Hash Table)** for decentralized peer discovery
 - **Model manifests** for metadata and integrity verification
 - **Dynamic registry** that scans your models directory at startup
+- **Random ports** by default to allow multiple commands to run simultaneously
 
 ## Model Storage Structure
 
 Models are stored in a HuggingFace-compatible structure:
+
+```
+~/.silmaril/models/
+└── meta-llama/
+    └── Llama-3.1-8B/
+        ├── config.json
+        ├── tokenizer.json
+        ├── model-*.safetensors
+        └── .silmaril.json  # Silmaril metadata
+```
+
+## Tips & Best Practices
+
+1. **Auto-sharing**: The `mirror` command automatically starts sharing after downloading. This helps build the P2P network.
+
+2. **Publishing models**: Use `share` with `--name` and `--license` to publish any HuggingFace-format model directory:
+   ```bash
+   silmaril share ./my-model --name myorg/mymodel --license MIT
+   ```
+
+3. **Multiple instances**: Silmaril uses random ports by default, so you can run multiple commands simultaneously:
+   ```bash
+   # Terminal 1: Share all models
+   silmaril share --all
+   
+   # Terminal 2: Discover new models (works simultaneously)
+   silmaril discover
+   ```
+
+4. **Quick setup**: Initialize, mirror a model, and start sharing in one go:
+   ```bash
+   silmaril init
+   silmaril mirror mistralai/Mistral-7B-v0.1
+   # Model is automatically shared!
+   ```
 
 ## Contributing
 

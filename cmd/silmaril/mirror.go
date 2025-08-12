@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -11,9 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anacrolix/torrent/bencode"
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/silmaril/silmaril/internal/federation"
 	"github.com/silmaril/silmaril/internal/models"
 	"github.com/silmaril/silmaril/internal/storage"
+	"github.com/silmaril/silmaril/internal/torrent"
 	"github.com/silmaril/silmaril/pkg/types"
 	"github.com/spf13/cobra"
 )
@@ -37,6 +41,7 @@ var (
 	mirrorDepth  int
 	skipLFS      bool
 	noBroadcast  bool
+	noAutoShare  bool
 )
 
 func init() {
@@ -44,6 +49,7 @@ func init() {
 	mirrorCmd.Flags().IntVar(&mirrorDepth, "depth", 1, "Git clone depth (0 for full history)")
 	mirrorCmd.Flags().BoolVar(&skipLFS, "skip-lfs", false, "Skip downloading large files via Git LFS")
 	mirrorCmd.Flags().BoolVar(&noBroadcast, "no-broadcast", false, "Don't broadcast the model on DHT after mirroring")
+	mirrorCmd.Flags().BoolVar(&noAutoShare, "no-auto-share", false, "Don't automatically start sharing after mirroring")
 	
 	rootCmd.AddCommand(mirrorCmd)
 }
@@ -110,23 +116,65 @@ func runMirror(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to save manifest: %w", err)
 	}
 	
+	// Rescan registry to ensure the model is found
+	if err := registry.Rescan(); err != nil {
+		fmt.Printf("Warning: Failed to rescan registry: %v\n", err)
+	}
+	
 	fmt.Printf("Model registered: %s (version: %s)\n", manifest.Name, manifest.Version)
 	fmt.Printf("Total size: %.2f GB\n", float64(manifest.TotalSize)/(1024*1024*1024))
 	fmt.Printf("Files: %d\n", len(manifest.Files))
 	
-	// Broadcast on DHT if not disabled
+	// Create torrent for the model
+	fmt.Println("Creating torrent for P2P distribution...")
+	torrentPath, magnetURI, err := createModelTorrent(modelPath, modelName)
+	if err != nil {
+		fmt.Printf("Error: Failed to create torrent: %v\n", err)
+		fmt.Println("Model was cloned but torrent creation failed.")
+		fmt.Println("You can try creating a torrent manually with 'silmaril publish'")
+		return nil
+	}
+	
+	fmt.Printf("Torrent created: %s\n", torrentPath)
+	
+	// Update manifest with magnet URI
+	manifest.MagnetURI = magnetURI
+	if err := registry.SaveManifest(manifest); err != nil {
+		fmt.Printf("Warning: Failed to update manifest with magnet URI: %v\n", err)
+	}
+	
+	// Force registry rescan to ensure the updated manifest is loaded
+	if err := registry.Rescan(); err != nil {
+		fmt.Printf("Warning: Failed to rescan registry: %v\n", err)
+	}
+	
+	// Broadcast on DHT if not disabled (but don't start long-running seeding here)
 	if !noBroadcast {
 		fmt.Println("Broadcasting model on DHT network...")
-		if err := broadcastModel(manifest); err != nil {
+		if err := broadcastModelQuick(manifest); err != nil {
 			fmt.Printf("Warning: Failed to broadcast on DHT: %v\n", err)
-			// Don't fail the command if broadcast fails
 		} else {
-			fmt.Println("Model successfully broadcast on DHT network")
+			fmt.Println("Model announced to DHT network")
 		}
 	}
 	
-	fmt.Printf("\nModel successfully mirrored!\n")
-	fmt.Printf("You can now share it with: silmaril share %s\n", modelName)
+	fmt.Printf("\n✅ Model successfully mirrored!\n")
+	fmt.Printf("Model location: %s\n", modelPath)
+	if magnetURI != "" {
+		fmt.Printf("Magnet URI: %s\n", magnetURI)
+	}
+	
+	// Auto-share if not disabled
+	if !noAutoShare && torrentPath != "" {
+		fmt.Println("\nStarting to share the model...")
+		if err := startSharingModel(torrentPath, paths); err != nil {
+			fmt.Printf("Warning: Failed to start sharing: %v\n", err)
+			fmt.Println("You can manually share the model with:")
+			fmt.Printf("  silmaril share %s\n", modelName)
+		} else {
+			fmt.Println("✅ Model is now being shared on the P2P network!")
+		}
+	}
 	
 	return nil
 }
@@ -342,8 +390,129 @@ func generateManifestFromRepo(repoPath, modelName string) (*types.ModelManifest,
 	return manifest, nil
 }
 
-// broadcastModel broadcasts a model on the DHT network
-func broadcastModel(manifest *types.ModelManifest) error {
+// createModelTorrent creates a torrent file for the model
+func createModelTorrent(modelPath, modelName string) (torrentPath, magnetURI string, err error) {
+	// First, create a temporary directory with just the model files (no .git)
+	tempDir := filepath.Join(os.TempDir(), "silmaril-torrent-"+strings.ReplaceAll(modelName, "/", "_"))
+	defer os.RemoveAll(tempDir) // Clean up temp dir
+	
+	// Create the temp directory
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return "", "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	
+	// Copy all non-.git files to temp directory
+	modelFiles := 0
+	err = filepath.Walk(modelPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		
+		relPath, _ := filepath.Rel(modelPath, path)
+		
+		// Skip .git directory and its contents
+		if strings.HasPrefix(relPath, ".git") {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		
+		// Skip the directory itself
+		if path == modelPath {
+			return nil
+		}
+		
+		targetPath := filepath.Join(tempDir, relPath)
+		
+		if info.IsDir() {
+			return os.MkdirAll(targetPath, info.Mode())
+		}
+		
+		// Create hard link to avoid copying data
+		if err := os.Link(path, targetPath); err != nil {
+			// If hard link fails, fall back to copy
+			src, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer src.Close()
+			
+			dst, err := os.Create(targetPath)
+			if err != nil {
+				return err
+			}
+			defer dst.Close()
+			
+			if _, err := io.Copy(dst, src); err != nil {
+				return err
+			}
+		}
+		
+		modelFiles++
+		return nil
+	})
+	
+	if err != nil {
+		return "", "", fmt.Errorf("failed to prepare files for torrent: %w", err)
+	}
+	
+	fmt.Printf("  Prepared %d files for torrent (excluding .git)\n", modelFiles)
+	
+	// Create torrent info from temp directory
+	info := metainfo.Info{
+		PieceLength: 4 * 1024 * 1024, // 4MB pieces
+		Name:        filepath.Base(modelPath),
+	}
+	
+	// Build from the clean temp directory
+	err = info.BuildFromFilePath(tempDir)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to build torrent info: %w", err)
+	}
+	
+	// Create metainfo
+	mi := metainfo.MetaInfo{
+		CreatedBy:    "Silmaril Mirror",
+		CreationDate: time.Now().Unix(),
+		Comment:      fmt.Sprintf("Model: %s", modelName),
+	}
+	
+	mi.InfoBytes, err = bencode.Marshal(info)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to marshal torrent info: %w", err)
+	}
+	
+	// Generate magnet URI
+	magnetURI = mi.Magnet(nil, &info).String()
+	
+	// Save torrent file
+	paths, err := storage.NewPaths()
+	if err != nil {
+		return "", "", err
+	}
+	
+	torrentDir := paths.TorrentsDir()
+	if err := os.MkdirAll(torrentDir, 0755); err != nil {
+		return "", "", fmt.Errorf("failed to create torrents directory: %w", err)
+	}
+	
+	torrentPath = filepath.Join(torrentDir, strings.ReplaceAll(modelName, "/", "_")+".torrent")
+	f, err := os.Create(torrentPath)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create torrent file: %w", err)
+	}
+	defer f.Close()
+	
+	if err := mi.Write(f); err != nil {
+		return "", "", fmt.Errorf("failed to write torrent file: %w", err)
+	}
+	
+	return torrentPath, magnetURI, nil
+}
+
+// broadcastModelQuick announces a model to DHT without long-running seeding
+func broadcastModelQuick(manifest *types.ModelManifest) error {
 	// Initialize DHT discovery
 	paths, err := storage.NewPaths()
 	if err != nil {
@@ -356,18 +525,52 @@ func broadcastModel(manifest *types.ModelManifest) error {
 	}
 	defer dht.Close()
 	
-	// Bootstrap DHT
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Bootstrap DHT with shorter timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	
+	// Try to bootstrap but don't fail if it takes too long
 	if err := dht.Bootstrap(ctx); err != nil {
-		return fmt.Errorf("failed to bootstrap DHT: %w", err)
+		// Continue anyway, we might still be able to announce
+		fmt.Printf("Note: DHT bootstrap incomplete, announcement might be limited\n")
 	}
 	
 	// Announce the model
 	if err := dht.AnnounceModel(manifest); err != nil {
 		return fmt.Errorf("failed to announce model: %w", err)
 	}
+	
+	return nil
+}
+
+// startSharingModel starts sharing a model in the background
+func startSharingModel(torrentPath string, paths *storage.Paths) error {
+	// Create torrent client
+	cfg := torrent.Config{
+		DataDir:        paths.ModelsDir(),
+		MaxConnections: 100,
+		SeedRatio:      0, // Seed indefinitely
+	}
+	
+	client, err := torrent.NewClient(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create torrent client: %w", err)
+	}
+	
+	// Add torrent to client
+	_, err = client.AddTorrentFile(torrentPath)
+	if err != nil {
+		client.Close()
+		return fmt.Errorf("failed to add torrent: %w", err)
+	}
+	
+	// Start sharing in background goroutine
+	go func() {
+		// Keep client alive and seeding
+		// This will continue until the process exits
+		time.Sleep(365 * 24 * time.Hour)
+		client.Close()
+	}()
 	
 	return nil
 }

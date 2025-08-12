@@ -50,15 +50,16 @@ func runDiscover(cmd *cobra.Command, args []string) error {
 	}
 	defer dht.Close()
 	
-	// Bootstrap to DHT
+	// Bootstrap to DHT with shorter timeout
 	fmt.Print("Connecting to DHT network...")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	
 	err = dht.Bootstrap(ctx)
 	if err != nil {
-		fmt.Printf("\nWarning: DHT bootstrap incomplete: %v\n", err)
-		fmt.Println("Discovery might be limited.")
+		// Don't fail, just warn - we can still work with partial connectivity
+		fmt.Println(" partial connection")
+		fmt.Println("Note: DHT bootstrap incomplete, discovery might be limited")
 	} else {
 		fmt.Println(" connected!")
 	}

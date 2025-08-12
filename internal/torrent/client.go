@@ -48,6 +48,9 @@ func NewClient(cfg Config) (*Client, error) {
 	clientConfig.DataDir = cfg.DataDir
 	clientConfig.Seed = true
 	
+	// Use random port (0 = let OS choose an available port)
+	clientConfig.ListenPort = 0
+	
 	// Enable DHT - this is crucial for decentralized operation
 	clientConfig.NoDHT = false
 	
@@ -145,6 +148,31 @@ func (c *Client) AddTorrentFile(path string) (*Download, error) {
 	return dl, nil
 }
 
+// AddTorrentForSeeding adds a torrent specifically for seeding (not downloading)
+func (c *Client) AddTorrentForSeeding(path string) (*torrent.Torrent, error) {
+	mi, err := metainfo.LoadFromFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load torrent file: %w", err)
+	}
+	
+	t, err := c.client.AddTorrent(mi)
+	if err != nil {
+		return nil, fmt.Errorf("failed to add torrent: %w", err)
+	}
+	
+	// Wait for torrent info if needed
+	select {
+	case <-t.GotInfo():
+	case <-time.After(5 * time.Second):
+		// Continue anyway, we have the torrent added
+	}
+	
+	// Don't download, we're just seeding existing files
+	// The client will automatically seed files that exist in DataDir
+	
+	return t, nil
+}
+
 func (c *Client) monitorDownload(dl *Download) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -207,4 +235,9 @@ func (c *Client) monitorDownload(dl *Download) {
 
 func (dl *Download) Cancel() {
 	dl.cancel()
+}
+
+// GetTorrents returns all torrents in the client
+func (c *Client) GetTorrents() []*torrent.Torrent {
+	return c.client.Torrents()
 }
