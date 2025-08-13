@@ -5,9 +5,7 @@ import (
 	"sort"
 
 	"github.com/spf13/cobra"
-	"github.com/silmaril/silmaril/internal/models"
-	"github.com/silmaril/silmaril/internal/storage"
-	"github.com/silmaril/silmaril/pkg/types"
+	"github.com/silmaril/silmaril/internal/api/client"
 )
 
 var listCmd = &cobra.Command{
@@ -25,30 +23,24 @@ func init() {
 }
 
 func runList(cmd *cobra.Command, args []string) error {
-	// Get storage paths
-	paths, err := storage.NewPaths()
-	if err != nil {
-		return fmt.Errorf("failed to get storage paths: %w", err)
+	// Ensure daemon is running
+	if err := ensureDaemonRunning(); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
-	// Create registry
-	registry, err := models.NewRegistry(paths)
-	if err != nil {
-		return fmt.Errorf("failed to create registry: %w", err)
-	}
+	// Create API client
+	apiClient := client.NewClient(getDaemonURL())
 
-	// Rescan to ensure we have the latest
-	if err := registry.Rescan(); err != nil {
-		fmt.Printf("Warning: Failed to rescan models: %v\n", err)
+	// Get list of models from API
+	models, err := apiClient.ListModels()
+	if err != nil {
+		return fmt.Errorf("failed to list models: %w", err)
 	}
 
 	fmt.Println("Locally managed models:")
 	fmt.Println()
 
-	// Get all models from registry
-	modelList := registry.ListModels()
-	
-	if len(modelList) == 0 {
+	if len(models) == 0 {
 		fmt.Println("No models found.")
 		fmt.Println("\nUse 'silmaril get <model-name>' to download a model.")
 		fmt.Println("Use 'silmaril mirror <huggingface-url>' to mirror a model from HuggingFace.")
@@ -56,76 +48,106 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Sort models alphabetically
-	sort.Strings(modelList)
+	// Sort models by name
+	sort.Slice(models, func(i, j int) bool {
+		return getModelName(models[i]) < getModelName(models[j])
+	})
 
-	// Display each model with details
-	for _, modelName := range modelList {
-		manifest, err := registry.GetManifest(modelName)
-		if err != nil {
-			continue
+	// Display each model
+	totalSize := int64(0)
+	for _, model := range models {
+		displayModelFromAPI(model)
+		if size, ok := model["total_size"].(float64); ok {
+			totalSize += int64(size)
+		} else if size, ok := model["size"].(float64); ok {
+			totalSize += int64(size)
 		}
-
-		displayModel(manifest)
 	}
 
 	// Show summary
-	fmt.Printf("\nTotal models: %d\n", len(modelList))
-	
-	usage, err := paths.GetDiskUsage()
-	if err == nil {
-		fmt.Printf("Disk usage: %.2f GB\n", float64(usage.Models)/(1024*1024*1024))
+	fmt.Printf("\nTotal models: %d\n", len(models))
+	if totalSize > 0 {
+		fmt.Printf("Total disk usage: %.2f GB\n", float64(totalSize)/(1024*1024*1024))
 	}
 
 	return nil
 }
 
-func displayModel(manifest *types.ModelManifest) {
-	sizeGB := float64(manifest.TotalSize) / (1024 * 1024 * 1024)
+func displayModelFromAPI(model map[string]interface{}) {
+	name := getModelName(model)
+	fmt.Printf("  %s", name)
 	
-	fmt.Printf("  %s", manifest.Name)
-	if manifest.Version != "" && manifest.Version != "local" && manifest.Version != "main" {
-		fmt.Printf(" (v%s)", manifest.Version)
+	if version, ok := model["version"].(string); ok && version != "" && version != "local" && version != "main" {
+		fmt.Printf(" (v%s)", version)
 	}
 	fmt.Println()
 	
-	fmt.Printf("    Size: %.2f GB", sizeGB)
-	if manifest.License != "" {
-		fmt.Printf(" | License: %s", manifest.License)
+	// Size
+	var sizeGB float64
+	if size, ok := model["total_size"].(float64); ok {
+		sizeGB = size / (1024 * 1024 * 1024)
+	} else if size, ok := model["size"].(float64); ok {
+		sizeGB = size / (1024 * 1024 * 1024)
+	}
+	
+	if sizeGB > 0 {
+		fmt.Printf("    Size: %.2f GB", sizeGB)
+	}
+	
+	if license, ok := model["license"].(string); ok && license != "" {
+		fmt.Printf(" | License: %s", license)
 	}
 	fmt.Println()
 	
-	if manifest.ModelType != "" || manifest.Architecture != "" {
-		fmt.Printf("    Type: %s", manifest.ModelType)
-		if manifest.Architecture != "" {
-			fmt.Printf(" | Architecture: %s", manifest.Architecture)
+	// Model type and architecture
+	if modelType, ok := model["model_type"].(string); ok && modelType != "" {
+		fmt.Printf("    Type: %s", modelType)
+		
+		if arch, ok := model["architecture"].(string); ok && arch != "" {
+			fmt.Printf(" | Architecture: %s", arch)
 		}
-		if manifest.Parameters > 0 {
-			fmt.Printf(" | Parameters: %.1fB", float64(manifest.Parameters)/1e9)
+		
+		if params, ok := model["parameters"].(float64); ok && params > 0 {
+			fmt.Printf(" | Parameters: %.1fB", params/1e9)
 		}
 		fmt.Println()
 	}
 	
-	if manifest.InferenceHints.MinRAM > 0 {
-		fmt.Printf("    Min RAM: %d GB", manifest.InferenceHints.MinRAM)
-		if manifest.InferenceHints.MinVRAM > 0 {
-			fmt.Printf(" | Min VRAM: %d GB", manifest.InferenceHints.MinVRAM)
+	// Inference hints
+	if hints, ok := model["inference_hints"].(map[string]interface{}); ok {
+		if minRAM, ok := hints["min_ram_gb"].(float64); ok && minRAM > 0 {
+			fmt.Printf("    Min RAM: %.0f GB", minRAM)
+			
+			if minVRAM, ok := hints["min_vram_gb"].(float64); ok && minVRAM > 0 {
+				fmt.Printf(" | Min VRAM: %.0f GB", minVRAM)
+			}
+			fmt.Println()
 		}
-		fmt.Println()
 	}
 	
-	if manifest.Description != "" && manifest.Description != fmt.Sprintf("Model mirrored from HuggingFace: %s", manifest.Name) {
-		// Truncate long descriptions
-		desc := manifest.Description
-		if len(desc) > 100 {
-			desc = desc[:97] + "..."
+	// Description
+	if desc, ok := model["description"].(string); ok && desc != "" {
+		defaultDesc := fmt.Sprintf("Model imported from %s", name)
+		if desc != defaultDesc {
+			// Truncate long descriptions
+			if len(desc) > 100 {
+				desc = desc[:97] + "..."
+			}
+			fmt.Printf("    %s\n", desc)
 		}
-		fmt.Printf("    %s\n", desc)
 	}
 	
-	if manifest.MagnetURI != "" {
+	// P2P status
+	if magnet, ok := model["magnet_uri"].(string); ok && magnet != "" {
 		fmt.Println("    ✓ Ready to share via P2P")
 	}
 	
 	fmt.Println()
+}
+
+func getModelName(model map[string]interface{}) string {
+	if name, ok := model["name"].(string); ok {
+		return name
+	}
+	return "unknown"
 }

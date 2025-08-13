@@ -208,3 +208,29 @@ func (p *Paths) CleanupOldFiles(daysOld int) error {
 	// etc.
 	return nil
 }
+
+// Global helper functions for daemon usage
+
+// GetBaseDir returns the base directory for Silmaril data
+func GetBaseDir() string {
+	dir, _ := getBaseDir()
+	return dir
+}
+
+// GetModelsDir returns the models directory
+func GetModelsDir() string {
+	baseDir := GetBaseDir()
+	return filepath.Join(baseDir, "models")
+}
+
+// GetTorrentsDir returns the torrents directory
+func GetTorrentsDir() string {
+	baseDir := GetBaseDir()
+	return filepath.Join(baseDir, "torrents")
+}
+
+// GetRegistryDir returns the registry directory
+func GetRegistryDir() string {
+	baseDir := GetBaseDir()
+	return filepath.Join(baseDir, "registry")
+}

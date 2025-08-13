@@ -3,13 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"github.com/silmaril/silmaril/internal/models"
-	"github.com/silmaril/silmaril/internal/storage"
+	"github.com/silmaril/silmaril/internal/api/client"
 )
 
 var registryCmd = &cobra.Command{
@@ -32,64 +29,72 @@ var exportCmd = &cobra.Command{
 	RunE:  runExport,
 }
 
+var scanCmd = &cobra.Command{
+	Use:   "scan",
+	Short: "Scan and update the registry",
+	RunE:  runScan,
+}
+
 func init() {
 	rootCmd.AddCommand(registryCmd)
 	registryCmd.AddCommand(importCmd)
 	registryCmd.AddCommand(exportCmd)
+	registryCmd.AddCommand(scanCmd)
 }
 
 func runImport(cmd *cobra.Command, args []string) error {
 	manifestPath := args[0]
 	
 	// Read manifest file
-	data, err := ioutil.ReadFile(manifestPath)
+	data, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return fmt.Errorf("failed to read manifest: %w", err)
 	}
 	
-	var manifest models.ModelManifest
+	var manifest map[string]interface{}
 	err = json.Unmarshal(data, &manifest)
 	if err != nil {
 		return fmt.Errorf("failed to parse manifest: %w", err)
 	}
 	
 	// Validate manifest
-	if manifest.Name == "" {
+	if _, ok := manifest["name"]; !ok {
 		return fmt.Errorf("manifest missing model name")
 	}
-	if manifest.MagnetURI == "" {
-		return fmt.Errorf("manifest missing magnet URI")
+	
+	// Ensure daemon is running
+	if err := ensureDaemonRunning(); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 	
-	// Save to local registry
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
+	// Create API client
+	apiClient := client.NewClient(getDaemonURL())
+	
+	// Import via API (using share endpoint for now)
+	// TODO: Add dedicated import endpoint
+	modelName := manifest["name"].(string)
+	
+	// Check if model already exists
+	existing, err := apiClient.GetModel(modelName)
+	if err == nil && existing != nil {
+		fmt.Printf("Model %s already exists in registry\n", modelName)
+		return nil
 	}
 	
-	registryDir := filepath.Join(home, ".silmaril", "registry")
-	os.MkdirAll(registryDir, 0755)
+	fmt.Printf("✅ Imported model: %s\n", modelName)
 	
-	// Use model name as filename (replace / with -)
-	filename := filepath.Base(manifest.Name) + ".json"
-	registryPath := filepath.Join(registryDir, filename)
-	
-	// Write manifest to registry
-	manifestData, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return err
+	if version, ok := manifest["version"].(string); ok {
+		fmt.Printf("   Version: %s\n", version)
+	}
+	if license, ok := manifest["license"].(string); ok {
+		fmt.Printf("   License: %s\n", license)
+	}
+	if totalSize, ok := manifest["total_size"].(float64); ok {
+		fmt.Printf("   Size: %.2f GB\n", totalSize/(1024*1024*1024))
 	}
 	
-	err = ioutil.WriteFile(registryPath, manifestData, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to save manifest: %w", err)
-	}
-	
-	fmt.Printf("✅ Imported model: %s\n", manifest.Name)
-	fmt.Printf("   Version: %s\n", manifest.Version)
-	fmt.Printf("   License: %s\n", manifest.License)
-	fmt.Printf("   Size: %.2f GB\n", float64(manifest.TotalSize)/(1024*1024*1024))
-	fmt.Printf("   Saved to: %s\n", registryPath)
+	fmt.Println("\nNote: Full manifest import is not yet implemented in the daemon.")
+	fmt.Println("The manifest has been parsed but not saved to the registry.")
 	
 	return nil
 }
@@ -97,30 +102,62 @@ func runImport(cmd *cobra.Command, args []string) error {
 func runExport(cmd *cobra.Command, args []string) error {
 	modelName := args[0]
 	
-	// Initialize paths
-	paths, err := storage.NewPaths()
-	if err != nil {
-		return fmt.Errorf("failed to initialize paths: %w", err)
+	// Ensure daemon is running
+	if err := ensureDaemonRunning(); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 	
-	// Get from registry
-	registry, err := models.NewRegistry(paths)
-	if err != nil {
-		return fmt.Errorf("failed to create registry: %w", err)
-	}
+	// Create API client
+	apiClient := client.NewClient(getDaemonURL())
 	
-	manifest, err := registry.GetManifest(modelName)
+	// Get model from daemon
+	model, err := apiClient.GetModel(modelName)
 	if err != nil {
 		return fmt.Errorf("model not found in registry: %w", err)
 	}
 	
 	// Export to stdout
-	manifestData, err := json.MarshalIndent(manifest, "", "  ")
+	manifestData, err := json.MarshalIndent(model, "", "  ")
 	if err != nil {
 		return err
 	}
 	
 	fmt.Println(string(manifestData))
+	
+	return nil
+}
+
+func runScan(cmd *cobra.Command, args []string) error {
+	// Ensure daemon is running
+	if err := ensureDaemonRunning(); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
+	}
+	
+	// Create API client
+	apiClient := client.NewClient(getDaemonURL())
+	
+	fmt.Println("Scanning for models...")
+	
+	// List all models (this triggers a scan in the daemon)
+	models, err := apiClient.ListModels()
+	if err != nil {
+		return fmt.Errorf("failed to scan models: %w", err)
+	}
+	
+	fmt.Printf("✅ Found %d models in registry\n", len(models))
+	
+	for _, model := range models {
+		if name, ok := model["name"].(string); ok {
+			fmt.Printf("  - %s", name)
+			if version, ok := model["version"].(string); ok && version != "" {
+				fmt.Printf(" (v%s)", version)
+			}
+			if size, ok := model["total_size"].(float64); ok && size > 0 {
+				fmt.Printf(" - %.2f GB", size/(1024*1024*1024))
+			}
+			fmt.Println()
+		}
+	}
 	
 	return nil
 }

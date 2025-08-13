@@ -69,11 +69,12 @@ func (m *ModelManifest) ComputeHash() (string, error) {
 
 // ModelAnnouncement represents a model announcement in DHT
 type ModelAnnouncement struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Magnet  string `json:"magnet"`
-	Size    int64  `json:"size"`
-	Time    int64  `json:"time"`
+	Name     string `json:"name"`
+	Version  string `json:"version"`
+	Magnet   string `json:"magnet"`
+	InfoHash string `json:"info_hash"`
+	Size     int64  `json:"size"`
+	Time     int64  `json:"time"`
 }
 
 // ProgressUpdate represents download/upload progress

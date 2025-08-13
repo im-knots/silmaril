@@ -76,6 +76,40 @@ var (
 	v    *viper.Viper
 )
 
+// Helper methods for accessing config values
+
+// GetInt returns an integer value from the config
+func (c *Config) GetInt(key string) int {
+	if v != nil {
+		return v.GetInt(key)
+	}
+	return 0
+}
+
+// GetBool returns a boolean value from the config
+func (c *Config) GetBool(key string) bool {
+	if v != nil {
+		return v.GetBool(key)
+	}
+	return false
+}
+
+// GetString returns a string value from the config
+func (c *Config) GetString(key string) string {
+	if v != nil {
+		return v.GetString(key)
+	}
+	return ""
+}
+
+// GetStringSlice returns a string slice from the config
+func (c *Config) GetStringSlice(key string) []string {
+	if v != nil {
+		return v.GetStringSlice(key)
+	}
+	return nil
+}
+
 // Initialize sets up the configuration
 func Initialize() error {
 	v = viper.New()

@@ -1,210 +1,124 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/silmaril/silmaril/internal/federation"
-	"github.com/silmaril/silmaril/internal/storage"
-	"github.com/silmaril/silmaril/pkg/types"
+	"github.com/silmaril/silmaril/internal/api/client"
 )
 
 var discoverCmd = &cobra.Command{
-	Use:   "discover [model-name]",
-	Short: "Discover models available on the P2P network",
-	Long: `Discover models shared on the DHT network by other Silmaril users.
-Models are discovered using the 'silmaril:' prefix in the DHT.
+	Use:   "discover [pattern]",
+	Short: "Search for models available on the P2P network",
+	Long: `Discover models being shared by other users on the P2P network.
 
-This command searches the distributed network for available models.
-Use 'silmaril list' to see models already downloaded to your machine.`,
+You can optionally provide a search pattern to filter results:
+  silmaril discover          # Show all available models
+  silmaril discover llama     # Show models containing "llama"
+  silmaril discover meta-     # Show models starting with "meta-"
+
+This searches for models via DHT (Distributed Hash Table) on the BitTorrent network.`,
 	RunE: runDiscover,
 }
 
-var (
-	discoverTimeout int
-)
-
 func init() {
 	rootCmd.AddCommand(discoverCmd)
-	
-	discoverCmd.Flags().IntVarP(&discoverTimeout, "timeout", "t", 30, "discovery timeout in seconds")
+	discoverCmd.Flags().IntP("timeout", "t", 30, "Discovery timeout in seconds")
 }
 
 func runDiscover(cmd *cobra.Command, args []string) error {
-	fmt.Println("Discovering models on the DHT network...")
-	fmt.Printf("Using prefix: %s\n", federation.SilmarilPrefix)
-	
-	// Initialize paths
-	paths, err := storage.NewPaths()
-	if err != nil {
-		return fmt.Errorf("failed to initialize paths: %w", err)
+	// Ensure daemon is running
+	if err := ensureDaemonRunning(); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
 	}
-	
-	// Create DHT discovery
-	dht, err := federation.NewDHTDiscovery(paths.BaseDir(), 0)
-	if err != nil {
-		return fmt.Errorf("failed to create DHT client: %w", err)
-	}
-	defer dht.Close()
-	
-	// Bootstrap to DHT with shorter timeout
-	fmt.Print("Connecting to DHT network...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	
-	err = dht.Bootstrap(ctx)
-	if err != nil {
-		// Don't fail, just warn - we can still work with partial connectivity
-		fmt.Println(" partial connection")
-		fmt.Println("Note: DHT bootstrap incomplete, discovery might be limited")
-	} else {
-		fmt.Println(" connected!")
-	}
-	
-	// If specific model name provided, search for it
+
+	// Get search pattern
+	pattern := ""
 	if len(args) > 0 {
-		modelName := args[0]
-		fmt.Printf("\nSearching for model: %s\n", modelName)
-		
-		// Search with timeout
-		searchCtx, searchCancel := context.WithTimeout(context.Background(), time.Duration(discoverTimeout)*time.Second)
-		defer searchCancel()
-		
-		found := false
-		// Try exact name and common patterns
-		patterns := []string{
-			modelName,
-			fmt.Sprintf("%s/latest", modelName),
-			fmt.Sprintf("%s/main", modelName),
-		}
-		
-		for _, pattern := range patterns {
-			manifest := searchForModel(dht, searchCtx, pattern)
-			if manifest != nil {
-				found = true
-				displayDiscoveredModel(manifest)
-				break
-			}
-		}
-		
-		if !found {
-			fmt.Println("\nModel not found on the network.")
-			fmt.Println("The model might not be shared yet, or you may need to wait for DHT propagation.")
-		}
-		
-		return nil
+		pattern = strings.Join(args, " ")
 	}
-	
-	// Otherwise, discover all available models
-	fmt.Println("\nSearching for models (this may take a moment)...")
-	
-	ctx, cancel = context.WithTimeout(context.Background(), time.Duration(discoverTimeout)*time.Second)
-	defer cancel()
-	
-	manifests, err := dht.DiscoverModels(ctx)
+
+	fmt.Println("Discovering models on the P2P network...")
+	if pattern != "" {
+		fmt.Printf("Searching for: %s\n", pattern)
+	}
+	fmt.Println()
+
+	// Create API client
+	apiClient := client.NewClient(getDaemonURL())
+
+	// Discover models via API
+	models, err := apiClient.DiscoverModels(pattern)
 	if err != nil {
 		return fmt.Errorf("failed to discover models: %w", err)
 	}
-	
-	if len(manifests) == 0 {
-		fmt.Println("\nNo models found on the network yet.")
-		fmt.Println("Models shared by other users will appear here as they are announced to the DHT.")
-		fmt.Println("\nTo share your own model, use:")
-		fmt.Println("  silmaril publish <model-directory> --name <org/model>")
+
+	if len(models) == 0 {
+		fmt.Println("No models found on the network.")
+		if pattern != "" {
+			fmt.Println("\nTry a different search pattern or run without arguments to see all models.")
+		} else {
+			fmt.Println("\nModels shared by other users will appear here as they are announced to the DHT.")
+			fmt.Println("To share your own models, use: silmaril share <model-name>")
+		}
 		return nil
 	}
-	
-	fmt.Printf("\nFound %d models on the network:\n\n", len(manifests))
-	
+
+	fmt.Printf("Found %d model(s) on the network:\n\n", len(models))
+
 	// Group by organization
-	byOrg := make(map[string][]*types.ModelManifest)
-	for _, manifest := range manifests {
-		parts := strings.Split(manifest.Name, "/")
+	byOrg := make(map[string][]map[string]interface{})
+	for _, model := range models {
+		name := ""
+		if n, ok := model["name"].(string); ok {
+			name = n
+		}
+		
+		parts := strings.Split(name, "/")
 		org := "unknown"
 		if len(parts) > 1 {
 			org = parts[0]
 		}
-		byOrg[org] = append(byOrg[org], manifest)
+		byOrg[org] = append(byOrg[org], model)
 	}
-	
-	// Display grouped
-	for org, models := range byOrg {
+
+	// Display grouped by organization
+	for org, orgModels := range byOrg {
 		fmt.Printf("  %s:\n", org)
-		for _, manifest := range models {
-			fmt.Printf("    - %s", manifest.Name)
-			if manifest.Version != "" && manifest.Version != "discovered" {
-				fmt.Printf(" (v%s)", manifest.Version)
-			}
-			if manifest.Size > 0 {
-				sizeGB := float64(manifest.Size) / (1024 * 1024 * 1024)
-				fmt.Printf(" - %.1f GB", sizeGB)
-			}
-			fmt.Println()
+		for _, model := range orgModels {
+			displayDiscoveredModel(model, true)
 		}
 		fmt.Println()
 	}
-	
-	fmt.Println("To get more information about a model:")
-	fmt.Println("  silmaril discover <model-name>")
-	fmt.Println("\nTo download a model:")
-	fmt.Println("  silmaril get <model-name>")
-	
+
+	fmt.Println("To download a model, use: silmaril get <model-name>")
+
 	return nil
 }
 
-func searchForModel(dht *federation.DHTDiscovery, ctx context.Context, modelName string) *types.ModelManifest {
-	// This is a wrapper around the DHT search
-	// In a real implementation, this would query peers for manifest data
-	manifest, _ := dht.SearchForModel(ctx, modelName)
-	return manifest
-}
-
-func displayDiscoveredModel(manifest *types.ModelManifest) {
-	fmt.Printf("\n✅ Found model: %s\n", manifest.Name)
-	
-	if manifest.Version != "" && manifest.Version != "discovered" {
-		fmt.Printf("   Version: %s\n", manifest.Version)
+func displayDiscoveredModel(model map[string]interface{}, indent bool) {
+	prefix := "  "
+	if indent {
+		prefix = "    - "
 	}
 	
-	if manifest.License != "" {
-		fmt.Printf("   License: %s\n", manifest.License)
+	name := ""
+	if n, ok := model["name"].(string); ok {
+		name = n
 	}
 	
-	if manifest.TotalSize > 0 {
-		sizeGB := float64(manifest.TotalSize) / (1024 * 1024 * 1024)
-		fmt.Printf("   Size: %.2f GB\n", sizeGB)
-	} else if manifest.Size > 0 {
-		sizeGB := float64(manifest.Size) / (1024 * 1024 * 1024)
-		fmt.Printf("   Size: %.2f GB\n", sizeGB)
+	fmt.Printf("%s%s", prefix, name)
+	
+	if version, ok := model["version"].(string); ok && version != "" && version != "main" {
+		fmt.Printf(" (v%s)", version)
 	}
 	
-	if manifest.ModelType != "" {
-		fmt.Printf("   Type: %s", manifest.ModelType)
-		if manifest.Architecture != "" {
-			fmt.Printf(" (%s)", manifest.Architecture)
-		}
-		fmt.Println()
+	// Size
+	if size, ok := model["size"].(float64); ok && size > 0 {
+		sizeGB := size / (1024 * 1024 * 1024)
+		fmt.Printf(" - %.2f GB", sizeGB)
 	}
 	
-	if manifest.Parameters > 0 {
-		fmt.Printf("   Parameters: %.1fB\n", float64(manifest.Parameters)/1e9)
-	}
-	
-	if manifest.Description != "" {
-		fmt.Printf("   Description: %s\n", manifest.Description)
-	}
-	
-	if manifest.MagnetURI != "" {
-		fmt.Printf("\n   Magnet: %s", manifest.MagnetURI)
-		if len(manifest.MagnetURI) > 60 {
-			fmt.Printf("...%s", manifest.MagnetURI[len(manifest.MagnetURI)-20:])
-		}
-		fmt.Println()
-	}
-	
-	fmt.Println("\nTo download this model:")
-	fmt.Printf("  silmaril get %s\n", manifest.Name)
+	fmt.Println()
 }

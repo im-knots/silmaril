@@ -1,28 +1,15 @@
 package main
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
 
-	anacrolixtorrent "github.com/anacrolix/torrent"
-	"github.com/anacrolix/torrent/bencode"
-	"github.com/anacrolix/torrent/metainfo"
 	"github.com/spf13/cobra"
-	"github.com/silmaril/silmaril/internal/federation"
-	"github.com/silmaril/silmaril/internal/models"
-	"github.com/silmaril/silmaril/internal/signing"
-	"github.com/silmaril/silmaril/internal/storage"
-	"github.com/silmaril/silmaril/internal/torrent"
-	"github.com/silmaril/silmaril/pkg/types"
+	"github.com/silmaril/silmaril/internal/api/client"
 )
 
 var shareCmd = &cobra.Command{
@@ -70,189 +57,90 @@ func init() {
 }
 
 func runShare(cmd *cobra.Command, args []string) error {
-	// Initialize paths and registry
-	paths, err := storage.NewPaths()
-	if err != nil {
-		return fmt.Errorf("failed to initialize paths: %w", err)
+	// Ensure daemon is running
+	if err := ensureDaemonRunning(); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 	
-	registry, err := models.NewRegistry(paths)
-	if err != nil {
-		return fmt.Errorf("failed to create registry: %w", err)
-	}
+	// Create API client
+	apiClient := client.NewClient(getDaemonURL())
 	
-	// Rescan to ensure we have the latest models
-	if err := registry.Rescan(); err != nil {
-		fmt.Printf("Warning: Failed to rescan registry: %v\n", err)
-	}
-	
-	// Create torrent client
-	cfg := torrent.Config{
-		DataDir:        paths.ModelsDir(),
-		MaxConnections: 100,
-		SeedRatio:      0, // Seed indefinitely
-	}
-	
-	client, err := torrent.NewClient(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to create torrent client: %w", err)
-	}
-	defer client.Close()
-	
-	var torrentsToSeed []string
+	var modelNameToShare string
+	var pathToShare string
 	
 	if shareAll {
-		// Seed all models in the registry
+		// Share all models
 		fmt.Println("Seeding all downloaded models...")
 		
-		models := registry.ListModels()
-		if len(models) == 0 {
+		result, err := apiClient.ShareModel("", "", true)
+		if err != nil {
+			return fmt.Errorf("failed to share models: %w", err)
+		}
+		
+		modelsShared := 0
+		totalModels := 0
+		if ms, ok := result["models_shared"].(float64); ok {
+			modelsShared = int(ms)
+		}
+		if tm, ok := result["total_models"].(float64); ok {
+			totalModels = int(tm)
+		}
+		
+		if totalModels == 0 {
 			fmt.Println("No models found in registry.")
 			fmt.Println("Use 'silmaril get' or 'silmaril mirror' to download models first.")
 			return nil
 		}
 		
-		for _, modelName := range models {
-			torrentPath := filepath.Join(paths.TorrentsDir(), strings.ReplaceAll(modelName, "/", "_")+".torrent")
-			if _, err := os.Stat(torrentPath); err == nil {
-				torrentsToSeed = append(torrentsToSeed, torrentPath)
-				fmt.Printf("Found torrent for: %s\n", modelName)
-			} else {
-				// Try to find torrent in model directory
-				modelPath := paths.ModelPath(modelName)
-				modelTorrent := filepath.Join(modelPath, "model.torrent")
-				if _, err := os.Stat(modelTorrent); err == nil {
-					torrentsToSeed = append(torrentsToSeed, modelTorrent)
-					fmt.Printf("Found torrent for: %s\n", modelName)
-				}
-			}
-		}
+		fmt.Printf("✅ Started sharing %d out of %d models\n", modelsShared, totalModels)
+		
 	} else if len(args) > 0 {
 		input := args[0]
 		
-		// Try as model name first if it contains /
+		// Check if it's a model name (contains /)
 		if strings.Contains(input, "/") {
-			manifest, err := registry.GetManifest(input)
-			if err == nil {
-				// Found in registry
-				fmt.Printf("Seeding model: %s\n", input)
-				
-				// Look for torrent file
-				torrentPath := filepath.Join(paths.TorrentsDir(), strings.ReplaceAll(input, "/", "_")+".torrent")
-				if _, err := os.Stat(torrentPath); err == nil {
-					torrentsToSeed = append(torrentsToSeed, torrentPath)
-					fmt.Printf("Found torrent file: %s\n", torrentPath)
-				} else {
-					// Try model directory
-					modelPath := paths.ModelPath(input)
-					modelTorrent := filepath.Join(modelPath, "model.torrent")
-					if _, err := os.Stat(modelTorrent); err == nil {
-						torrentsToSeed = append(torrentsToSeed, modelTorrent)
-						fmt.Printf("Found torrent in model directory: %s\n", modelTorrent)
-					} else if manifest.MagnetURI != "" {
-						// Use magnet URI if available
-						fmt.Printf("No torrent file found, using magnet URI\n")
-						fmt.Printf("Magnet: %s\n", manifest.MagnetURI)
-						dl, err := client.AddMagnet(manifest.MagnetURI)
-						if err != nil {
-							return fmt.Errorf("failed to add magnet: %w", err)
-						}
-						// For magnet links, we can still monitor
-						fmt.Printf("  ✓ Added via magnet: %s\n", dl.Torrent.InfoHash().HexString())
-						
-						// Jump to monitoring without going through file-based torrent loading
-						// Set up signal handling for graceful shutdown
-						sigChan := make(chan os.Signal, 1)
-						signal.Notify(sigChan, os.Interrupt)
-						
-						// Monitor seeding
-						ticker := time.NewTicker(10 * time.Second)
-						defer ticker.Stop()
-						
-						fmt.Println("\nSeeding models... Press Ctrl+C to stop")
-						fmt.Println()
-						
-						for {
-							select {
-							case <-ticker.C:
-								// Print seeding statistics
-								var totalUploaded int64
-								var activeTorrents int
-								var totalPeers int
-								
-								// Get stats from all torrents
-								allTorrents := client.GetTorrents()
-								for _, t := range allTorrents {
-									if t.Info() != nil {
-										activeTorrents++
-										stats := t.Stats()
-										totalUploaded += stats.BytesWrittenData.Int64()
-										totalPeers += len(t.PeerConns())
-									}
-								}
-								
-								fmt.Printf("\rActive torrents: %d | Peers: %d | Total uploaded: %.2f GB",
-									activeTorrents, totalPeers, float64(totalUploaded)/(1024*1024*1024))
-								
-							case <-sigChan:
-								fmt.Println("\n\nShutting down...")
-								return nil
-							}
-						}
-						// Function returns in the loop above, so no need for explicit return
-					} else {
-						// Debug: show what we checked
-						fmt.Printf("Debug: Checked for torrent at: %s (not found)\n", torrentPath)
-						fmt.Printf("Debug: Checked for torrent at: %s (not found)\n", modelTorrent)
-						fmt.Printf("Debug: Manifest has magnet URI: %v\n", manifest.MagnetURI != "")
-						return fmt.Errorf("no torrent file or magnet URI found for model: %s", input)
-					}
-				}
-				goto addTorrents
-			}
-		}
-		
-		// Not a model name or not in registry, check as path
-		info, err := os.Stat(input)
-		if err != nil {
-			return fmt.Errorf("'%s' is not a valid model name or path: %w", input, err)
-		}
-		
-		if info.IsDir() {
-			// Look for existing torrent file in directory
-			torrentPath := filepath.Join(input, "model.torrent")
-			if _, err := os.Stat(torrentPath); err == nil {
-				torrentsToSeed = append(torrentsToSeed, torrentPath)
-				fmt.Printf("Found torrent in directory: %s\n", torrentPath)
-			} else {
-				// Check if it's in torrents directory
-				baseName := filepath.Base(input)
-				torrentPath = filepath.Join(paths.TorrentsDir(), baseName+".torrent")
-				if _, err := os.Stat(torrentPath); err == nil {
-					torrentsToSeed = append(torrentsToSeed, torrentPath)
-				} else {
-					// No torrent exists - create one if --name and --license provided
-					if modelName != "" && modelLicense != "" {
-						fmt.Printf("Publishing new model from directory: %s\n", input)
-						torrentPath, err := publishModelFromDirectory(input, paths, registry)
-						if err != nil {
-							return fmt.Errorf("failed to publish model: %w", err)
-						}
-						torrentsToSeed = append(torrentsToSeed, torrentPath)
-					} else {
-						fmt.Println("No torrent file found for directory.")
-						fmt.Println("To create and share a new model, provide --name and --license:")
-						fmt.Printf("  silmaril share %s --name org/model --license apache-2.0\n", input)
-						return nil
-					}
-				}
-			}
-		} else if filepath.Ext(input) == ".torrent" {
-			// Direct torrent file
-			torrentsToSeed = append(torrentsToSeed, input)
+			// Try to share as a model name
+			modelNameToShare = input
+			fmt.Printf("Seeding model: %s\n", input)
+			
 		} else {
-			return fmt.Errorf("invalid input: must be a model name, directory, or torrent file")
+			// Check if it's a file or directory
+			info, err := os.Stat(input)
+			if err != nil {
+				return fmt.Errorf("'%s' is not a valid model name or path: %w", input, err)
+			}
+			
+			if info.IsDir() {
+				// Directory - check if we need to publish
+				if modelName != "" && modelLicense != "" {
+					// We need to publish first (not yet implemented in API)
+					return fmt.Errorf("publishing new models from directory is not yet implemented via daemon API")
+				} else {
+					// Look for existing model in directory
+					pathToShare = input
+				}
+			} else if filepath.Ext(input) == ".torrent" {
+				// Direct torrent file
+				pathToShare = input
+			} else {
+				return fmt.Errorf("invalid input: must be a model name, directory, or torrent file")
+			}
 		}
+		
+		// Share the specific model or path
+		result, err := apiClient.ShareModel(modelNameToShare, pathToShare, false)
+		if err != nil {
+			return fmt.Errorf("failed to share: %w", err)
+		}
+		
+		if msg, ok := result["message"].(string); ok {
+			fmt.Printf("✅ %s\n", msg)
+		}
+		
+		if transferID, ok := result["transfer_id"].(string); ok {
+			fmt.Printf("Transfer ID: %s\n", transferID)
+		}
+		
 	} else {
 		// No arguments and not --all
 		fmt.Println("Please specify a model name or use --all to seed all models")
@@ -263,26 +151,8 @@ func runShare(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	
-addTorrents:
-	// Add all torrents to client for seeding
-	var addedTorrents []*anacrolixtorrent.Torrent
-	for _, torrentPath := range torrentsToSeed {
-		fmt.Printf("Loading torrent: %s\n", filepath.Base(torrentPath))
-		t, err := client.AddTorrentForSeeding(torrentPath)
-		if err != nil {
-			fmt.Printf("Warning: Failed to add %s: %v\n", torrentPath, err)
-			continue
-		}
-		addedTorrents = append(addedTorrents, t)
-		fmt.Printf("  ✓ Added: %s (Info Hash: %s)\n", t.Name(), t.InfoHash().HexString())
-	}
-	
-	if len(addedTorrents) == 0 {
-		return fmt.Errorf("no torrents were successfully added")
-	}
-	
-	// Torrents will be automatically announced to DHT by the client
-	fmt.Println("\nTorrents loaded and announcing to DHT network...")
+	// Monitor seeding if requested
+	fmt.Println("\nSeeding models... Press Ctrl+C to stop")
 	
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -292,232 +162,41 @@ addTorrents:
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	
-	fmt.Println("\nSeeding models... Press Ctrl+C to stop")
-	fmt.Println()
-	
 	for {
 		select {
 		case <-ticker.C:
-			// Print seeding statistics
-			var totalUploaded int64
-			var activeTorrents int
-			var totalPeers int
+			// Get transfer stats from daemon
+			transfers, err := apiClient.ListTransfers("active")
+			if err != nil {
+				fmt.Printf("\rError getting transfer stats: %v", err)
+				continue
+			}
 			
-			// Get stats from all torrents
-			allTorrents := client.GetTorrents()
-			for _, t := range allTorrents {
-				if t.Info() != nil {
-					activeTorrents++
-					stats := t.Stats()
-					totalUploaded += stats.BytesWrittenData.Int64()
-					totalPeers += len(t.PeerConns())
+			seedCount := 0
+			totalPeers := 0
+			var totalUploaded float64
+			
+			for _, transfer := range transfers {
+				if transferType, ok := transfer["type"].(string); ok && transferType == "seed" {
+					seedCount++
+				}
+				if peers, ok := transfer["peers"].(float64); ok {
+					totalPeers += int(peers)
+				}
+				if uploaded, ok := transfer["bytes_transferred"].(float64); ok {
+					totalUploaded += uploaded
 				}
 			}
 			
-			fmt.Printf("\rActive torrents: %d | Peers: %d | Total uploaded: %.2f GB",
-				activeTorrents, totalPeers, float64(totalUploaded)/(1024*1024*1024))
+			fmt.Printf("\rActive seeds: %d | Peers: %d | Total uploaded: %.2f GB",
+				seedCount, totalPeers, totalUploaded/(1024*1024*1024))
 			
 		case <-sigChan:
 			fmt.Println("\n\nShutting down...")
+			// The daemon will continue seeding even after we exit
+			fmt.Println("Note: The daemon will continue seeding in the background.")
+			fmt.Println("Use 'silmaril daemon stop' to stop the daemon and all transfers.")
 			return nil
 		}
 	}
-}
-
-// publishModelFromDirectory creates a torrent and manifest for a model directory
-func publishModelFromDirectory(modelDir string, paths *storage.Paths, registry *models.Registry) (string, error) {
-	// Parse config.json if it exists
-	var hfConfig types.HFConfig
-	var architecture string
-	var parameters int64
-	
-	configPath := filepath.Join(modelDir, "config.json")
-	if configData, err := os.ReadFile(configPath); err == nil {
-		json.Unmarshal(configData, &hfConfig)
-		if len(hfConfig.Architectures) > 0 {
-			architecture = hfConfig.Architectures[0]
-		}
-		// Estimate parameters if not provided
-		if hfConfig.NumParameters > 0 {
-			parameters = hfConfig.NumParameters
-		} else if hfConfig.HiddenSize > 0 && hfConfig.NumHiddenLayers > 0 {
-			// Rough estimation for transformer models
-			parameters = int64(hfConfig.HiddenSize) * int64(hfConfig.NumHiddenLayers) * 12 * 1_000_000
-		}
-	}
-	
-	// Scan directory and calculate SHA256 for each file
-	var files []types.ModelFile
-	var totalSize int64
-	
-	err := filepath.Walk(modelDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		
-		if info.IsDir() {
-			return nil
-		}
-		
-		// Skip hidden files and .git
-		relPath, _ := filepath.Rel(modelDir, path)
-		if strings.HasPrefix(relPath, ".git") || strings.HasPrefix(info.Name(), ".") {
-			return nil
-		}
-		
-		fmt.Printf("Processing: %s\n", relPath)
-		
-		// Calculate SHA256
-		hash, err := calculateFileSHA256(path)
-		if err != nil {
-			return fmt.Errorf("failed to hash %s: %w", relPath, err)
-		}
-		
-		files = append(files, types.ModelFile{
-			Path:   relPath,
-			Size:   info.Size(),
-			SHA256: hash,
-		})
-		
-		totalSize += info.Size()
-		
-		return nil
-	})
-	
-	if err != nil {
-		return "", fmt.Errorf("failed to scan directory: %w", err)
-	}
-	
-	fmt.Printf("\nTotal files: %d\n", len(files))
-	fmt.Printf("Total size: %.2f GB\n", float64(totalSize)/(1024*1024*1024))
-	
-	// Create torrent
-	fmt.Println("\nCreating torrent...")
-	torrentInfo := metainfo.Info{
-		PieceLength: pieceLength,
-	}
-	
-	err = torrentInfo.BuildFromFilePath(modelDir)
-	if err != nil {
-		return "", fmt.Errorf("failed to build torrent info: %w", err)
-	}
-	
-	// Create metainfo
-	mi := metainfo.MetaInfo{
-		CreationDate: time.Now().Unix(),
-		CreatedBy:    "Silmaril P2P Model Client",
-		Comment:      fmt.Sprintf("Model: %s", modelName),
-	}
-	
-	mi.InfoBytes, err = bencode.Marshal(torrentInfo)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal torrent info: %w", err)
-	}
-	
-	// Generate magnet URI
-	magnetURI := mi.Magnet(nil, &torrentInfo).String()
-	
-	// Create manifest
-	manifest := &types.ModelManifest{
-		Name:         modelName,
-		Version:      modelVersion,
-		Description:  fmt.Sprintf("Model published via Silmaril"),
-		License:      modelLicense,
-		CreatedAt:    time.Now(),
-		Architecture: architecture,
-		ModelType:    hfConfig.ModelType,
-		Parameters:   parameters,
-		InferenceHints: types.InferenceHints{
-			MinRAM:        totalSize / (1024 * 1024 * 1024) * 2, // Rough estimate
-			ContextLength: hfConfig.MaxPositionEmbeddings,
-		},
-		TotalSize: totalSize,
-		Files:     files,
-		MagnetURI: magnetURI,
-	}
-	
-	// Sign manifest if requested
-	if signManifest {
-		keyPair, err := signing.GetOrCreateKeys()
-		if err != nil {
-			fmt.Printf("Warning: Failed to get signing keys: %v\n", err)
-		} else {
-			err = signing.SignManifest(manifest, keyPair.PrivateKey)
-			if err != nil {
-				fmt.Printf("Warning: Failed to sign manifest: %v\n", err)
-			} else {
-				fmt.Println("✅ Manifest signed successfully")
-			}
-		}
-	}
-	
-	// Save manifest to registry
-	err = registry.SaveManifest(manifest)
-	if err != nil {
-		fmt.Printf("Warning: Failed to save manifest: %v\n", err)
-	}
-	
-	// Save torrent file
-	torrentDir := paths.TorrentsDir()
-	if err := os.MkdirAll(torrentDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create torrents directory: %w", err)
-	}
-	
-	torrentPath := filepath.Join(torrentDir, strings.ReplaceAll(modelName, "/", "_")+".torrent")
-	torrentFile, err := os.Create(torrentPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create torrent file: %w", err)
-	}
-	defer torrentFile.Close()
-	
-	err = mi.Write(torrentFile)
-	if err != nil {
-		return "", fmt.Errorf("failed to write torrent file: %w", err)
-	}
-	
-	fmt.Println("\n✅ Model published successfully!")
-	fmt.Printf("Torrent saved to: %s\n", torrentPath)
-	fmt.Printf("Magnet link:\n%s\n", magnetURI)
-	
-	// Announce to DHT
-	if !skipDHT {
-		fmt.Println("\nAnnouncing to DHT network...")
-		dht, err := federation.NewDHTDiscovery(paths.BaseDir(), 0)
-		if err != nil {
-			fmt.Printf("Warning: Failed to create DHT client: %v\n", err)
-		} else {
-			defer dht.Close()
-			
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			err = dht.Bootstrap(ctx)
-			if err != nil {
-				fmt.Printf("Warning: DHT bootstrap failed: %v\n", err)
-			} else {
-				err = dht.AnnounceModel(manifest)
-				if err != nil {
-					fmt.Printf("Warning: Failed to announce to DHT: %v\n", err)
-				} else {
-					fmt.Println("✅ Model announced to DHT network!")
-				}
-			}
-		}
-	}
-	
-	return torrentPath, nil
-}
-
-func calculateFileSHA256(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-	
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, file); err != nil {
-		return "", err
-	}
-	
-	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
