@@ -10,8 +10,6 @@ The system uses a "catalog-as-torrent" approach where the model catalog is itsel
 - **Catalog-as-Torrent**: Scalable discovery system using BitTorrent to distribute the model catalog itself
 - **BEP 44 Discovery**: Decentralized model discovery using DHT mutable items (no central tracker needed)
 - **HuggingFace Compatible**: Works with models in HuggingFace format
-- **Dynamic Registry**: Automatically discovers and manages models in your local directory
-- **Git Integration**: Mirror models directly from HuggingFace repositories
 - **Tag-based Search**: Find models by tags like "llama", "mistral", "7b", etc.
 - **Smart Caching**: Efficient catalog caching to minimize network requests
 
@@ -30,7 +28,7 @@ The binary will be available at `build/silmaril`.
 
 ## Quick Start
 
-### 0. Initialize Silmaril
+### Initialize Silmaril
 
 Set up the required directories and configuration:
 
@@ -41,20 +39,6 @@ silmaril init
 This will create:
 - `~/.silmaril/` directory structure for models, torrents, and metadata
 - `~/.config/silmaril/config.yaml` with default settings
-
-### 1. Start the Daemon
-
-Silmaril uses a daemon for all P2P operations. Start it before running other commands:
-
-```bash
-silmaril daemon start
-```
-
-Or run in foreground to see logs:
-
-```bash
-silmaril daemon start --foreground
-```
 
 To initialize in a custom location:
 
@@ -68,7 +52,39 @@ To completely remove Silmaril and all downloaded models:
 silmaril init --cleanup
 ```
 
-### 2. Discover Available Models
+### Start the Daemon
+
+Silmaril uses a daemon for all P2P operations. Start it before running other commands:
+
+```bash
+silmaril daemon start
+```
+
+Or run in foreground to see logs:
+
+```bash
+silmaril daemon start --foreground
+```
+
+#### Daemon Management
+
+The daemon must be running for most Silmaril operations:
+
+```bash
+# Check daemon status
+silmaril daemon status
+
+# Start daemon manually
+silmaril daemon start
+
+# Stop daemon
+silmaril daemon stop
+
+# View daemon logs
+silmaril daemon logs
+```
+
+### Discover Available Models
 
 Search for models shared by other users on the P2P network:
 
@@ -82,31 +98,19 @@ Search for a specific model:
 silmaril discover llama
 ```
 
-### 3. Download a Model
+### Download a Model
 
 Download a model from the P2P network:
 
 ```bash
-silmaril get meta-llama/Llama-3.1-8B
+silmaril get some-org/model-name
 ```
 
 The model will be downloaded to `~/.silmaril/models/` by default.
 
-### 4. Mirror from HuggingFace
+### Share Your Models
 
-Clone a model directly from HuggingFace and automatically share it on the P2P network:
-
-```bash
-silmaril mirror https://huggingface.co/mistralai/Mistral-7B-v0.1
-# or simply:
-silmaril mirror mistralai/Mistral-7B-v0.1
-```
-
-The model will be automatically seeded after mirroring. Use `--no-auto-share` to disable this.
-
-### 5. Share Your Models
-
-Seed all your downloaded models to help others:
+Seed all your downloaded models:
 
 ```bash
 silmaril share --all
@@ -124,7 +128,7 @@ Or share/publish a new model from a directory:
 silmaril share /path/to/model --name org/model --license apache-2.0
 ```
 
-### 6. List Local Models
+### List Local Models
 
 See what models you have downloaded:
 
@@ -132,23 +136,6 @@ See what models you have downloaded:
 silmaril list
 ```
 
-### 7. Daemon Management
-
-The daemon must be running for most Silmaril operations:
-
-```bash
-# Check daemon status
-silmaril daemon status
-
-# Start daemon manually
-silmaril daemon start
-
-# Stop daemon
-silmaril daemon stop
-
-# View daemon logs
-silmaril daemon logs
-```
 
 ## Publishing Your Own Models
 
@@ -167,8 +154,9 @@ This will:
 3. Announce the model on the DHT network
 4. Save to your local registry
 5. Start seeding the model immediately
+6. Update the global catalog
 
-Example: ./build/silmaril share test/models/test-org/hello-world --name test-org/debug-test --license MIT
+Example: `./build/silmaril share test/models/test-org/hello-world --name test-org/debug-test --license MIT`
 
 ## Configuration
 
@@ -211,10 +199,6 @@ security:
 - `silmaril share [model/path]` - Share existing models or publish new ones
 - `silmaril mirror <repo>` - Clone from HuggingFace and auto-share via P2P
 
-### Registry Management
-
-- `silmaril registry import <manifest.json>` - Import a model manifest
-- `silmaril registry export <model-name>` - Export a model manifest
 
 ### Command Options
 

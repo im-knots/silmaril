@@ -30,11 +30,17 @@ func TestListModels(t *testing.T) {
 	// Check response
 	assert.Equal(t, http.StatusOK, w.Code)
 	
-	var models []map[string]interface{}
-	err := json.Unmarshal(w.Body.Bytes(), &models)
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
 	require.NoError(t, err)
 	
-	// Should return empty array initially
+	// Should have models array and count
+	assert.Contains(t, response, "models")
+	assert.Contains(t, response, "count")
+	
+	// Models should be an array (possibly empty)
+	models, ok := response["models"].([]interface{})
+	assert.True(t, ok)
 	assert.NotNil(t, models)
 }
 

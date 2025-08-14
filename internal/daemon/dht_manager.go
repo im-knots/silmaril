@@ -350,17 +350,16 @@ func (dm *DHTManager) getLastRefreshTime() *time.Time {
 }
 
 func (dm *DHTManager) Stop() {
+	// Don't try to update catalog during shutdown - context is being cancelled
+	// Just cleanly shut down
 	dm.cancel()
 	
-	// Final announcement to ensure peers know we're going offline
-	if dm.catalogRef != nil {
-		for _, ann := range dm.announcements {
-			// Best effort - don't worry about errors during shutdown
-			_ = dm.catalogRef.AddModel(ann.Name, ann.InfoHash, ann.Size)
-		}
+	// Close the DHT server first
+	if dm.dhtServer != nil {
+		dm.dhtServer.Close()
 	}
 	
-	// Close the DHT connection
+	// Then close the DHT connection
 	if dm.dhtConn != nil {
 		dm.dhtConn.Close()
 	}

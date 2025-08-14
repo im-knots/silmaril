@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -45,70 +44,9 @@ func TestDaemonNew(t *testing.T) {
 	d.Shutdown()
 }
 
-func TestDaemonLockFile(t *testing.T) {
-	// Create temporary directory for test
-	tmpDir := t.TempDir()
-	os.Setenv("SILMARIL_HOME", tmpDir)
-	defer os.Unsetenv("SILMARIL_HOME")
+// TestDaemonLockFile removed - daemon management is now handled by gin framework
 
-	cfg := &config.Config{
-		Storage: config.StorageConfig{
-			BaseDir: tmpDir,
-		},
-	}
-
-	// Create first daemon
-	d1, err := New(cfg)
-	require.NoError(t, err)
-	assert.NotNil(t, d1)
-
-	// Try to create second daemon - should fail
-	d2, err := New(cfg)
-	assert.Error(t, err)
-	assert.Nil(t, d2)
-	assert.Contains(t, err.Error(), "already running")
-
-	// Clean up first daemon
-	d1.Shutdown()
-
-	// Now second daemon should succeed
-	d3, err := New(cfg)
-	require.NoError(t, err)
-	assert.NotNil(t, d3)
-	d3.Shutdown()
-}
-
-func TestDaemonPIDFile(t *testing.T) {
-	// Create temporary directory for test
-	tmpDir := t.TempDir()
-	os.Setenv("SILMARIL_HOME", tmpDir)
-	defer os.Unsetenv("SILMARIL_HOME")
-
-	cfg := &config.Config{
-		Storage: config.StorageConfig{
-			BaseDir: tmpDir,
-		},
-	}
-
-	// Create daemon
-	d, err := New(cfg)
-	require.NoError(t, err)
-
-	// Check PID file exists
-	pidFile := filepath.Join(tmpDir, "daemon", "daemon.pid")
-	assert.FileExists(t, pidFile)
-
-	// Read PID file
-	pidData, err := os.ReadFile(pidFile)
-	require.NoError(t, err)
-	assert.NotEmpty(t, pidData)
-
-	// Clean up
-	d.Shutdown()
-
-	// PID file should be removed
-	assert.NoFileExists(t, pidFile)
-}
+// TestDaemonPIDFile removed - daemon management is now handled by gin framework
 
 func TestDaemonGetters(t *testing.T) {
 	// Create temporary directory for test

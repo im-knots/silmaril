@@ -31,32 +31,52 @@ type ModelEntry struct {
 // extractTags extracts searchable tags from a model name
 func extractTags(name string) []string {
 	var tags []string
+	tagSet := make(map[string]bool) // Use set to avoid duplicates
 	lower := strings.ToLower(name)
 	
 	// Extract org/model parts
 	if parts := strings.Split(lower, "/"); len(parts) > 0 {
-		tags = append(tags, parts[0])
+		// Add organization part, splitting on hyphens
+		for _, part := range strings.Split(parts[0], "-") {
+			if part != "" {
+				tagSet[part] = true
+			}
+		}
+		
+		// Add model name parts, splitting on hyphens
 		if len(parts) > 1 {
 			for _, part := range strings.Split(parts[1], "-") {
-				if len(part) > 2 {
-					tags = append(tags, part)
+				if part != "" {
+					tagSet[part] = true
 				}
+			}
+		}
+	} else {
+		// No slash, just split on hyphens
+		for _, part := range strings.Split(lower, "-") {
+			if part != "" {
+				tagSet[part] = true
 			}
 		}
 	}
 	
-	// Common sizes
-	for _, size := range []string{"3b", "7b", "8b", "13b", "70b"} {
+	// Common sizes - add these as additional tags
+	for _, size := range []string{"3b", "7b", "8b", "8x7b", "13b", "70b"} {
 		if strings.Contains(lower, size) {
-			tags = append(tags, size)
+			tagSet[size] = true
 		}
 	}
 	
-	// Model families
+	// Model families - add if contained in name
 	for _, family := range []string{"llama", "mistral", "gpt", "gemma", "phi"} {
 		if strings.Contains(lower, family) {
-			tags = append(tags, family)
+			tagSet[family] = true
 		}
+	}
+	
+	// Convert set to slice
+	for tag := range tagSet {
+		tags = append(tags, tag)
 	}
 	
 	return tags
