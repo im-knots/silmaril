@@ -9,6 +9,10 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/silmaril/silmaril/internal/models"
 	"github.com/silmaril/silmaril/internal/storage"
 	"github.com/silmaril/silmaril/internal/torrent"
@@ -180,6 +184,11 @@ type ShareModelRequest struct {
 	PieceLength  int64  `json:"piece_length"` // Piece length for torrent
 	SkipDHT      bool   `json:"skip_dht"`      // Skip DHT announcement
 	SignManifest bool   `json:"sign_manifest"` // Sign the manifest
+	// Repository cloning parameters
+	RepoURL      string `json:"repo_url"`      // Git/HF repository URL
+	Branch       string `json:"branch"`        // Git branch
+	Depth        int    `json:"depth"`         // Git clone depth
+	SkipLFS      bool   `json:"skip_lfs"`      // Skip Git LFS files
 }
 
 // ShareModel starts sharing a model
@@ -188,6 +197,210 @@ func (h *Handlers) ShareModel(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("invalid request: %v", err),
+		})
+		return
+	}
+	
+	// Handle repository URL first (clone and share)
+	if req.RepoURL != "" {
+		// Set defaults for git operations
+		if req.Branch == "" {
+			req.Branch = "main"
+		}
+		if req.Depth == 0 {
+			req.Depth = 1
+		}
+		
+		// Parse repository URL to get model name
+		modelName := parseRepoURL(req.RepoURL)
+		if modelName == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "invalid repository URL",
+			})
+			return
+		}
+		
+		// Get storage paths
+		paths, err := storage.NewPaths()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("failed to initialize paths: %v", err),
+			})
+			return
+		}
+		
+		// Determine clone destination
+		modelPath := paths.ModelPath(modelName)
+		
+		// Check if model already exists
+		if _, err := os.Stat(modelPath); err == nil {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": fmt.Sprintf("model %s already exists", modelName),
+			})
+			return
+		}
+		
+		// Create parent directory
+		if err := os.MkdirAll(filepath.Dir(modelPath), 0755); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("failed to create model directory: %v", err),
+			})
+			return
+		}
+		
+		// Execute git clone in background
+		go func() {
+			fmt.Printf("[ShareModel] Cloning repository: %s to %s\n", req.RepoURL, modelPath)
+			
+			// Prepare clone options
+			cloneOptions := &git.CloneOptions{
+				URL:      req.RepoURL,
+				Progress: os.Stdout,
+			}
+			
+			// Set branch if not main/master
+			if req.Branch != "" && req.Branch != "main" && req.Branch != "master" {
+				cloneOptions.ReferenceName = plumbing.NewBranchReferenceName(req.Branch)
+			}
+			
+			// Set depth for shallow clone
+			if req.Depth > 0 {
+				cloneOptions.Depth = req.Depth
+			}
+			
+			// Handle authentication for private repos (optional)
+			// For HuggingFace, we might need token authentication
+			if strings.Contains(req.RepoURL, "huggingface.co") {
+				// Check for HF token in environment
+				if token := os.Getenv("HF_TOKEN"); token != "" {
+					cloneOptions.Auth = &githttp.BasicAuth{
+						Username: "hf",
+						Password: token,
+					}
+				}
+			}
+			
+			// Clone the repository
+			_, err := git.PlainClone(modelPath, false, cloneOptions)
+			if err != nil {
+				// Handle specific errors
+				if err == transport.ErrAuthenticationRequired {
+					fmt.Printf("[ShareModel] Authentication required for repository: %v\n", err)
+				} else if err == transport.ErrRepositoryNotFound {
+					fmt.Printf("[ShareModel] Repository not found: %v\n", err)
+				} else {
+					fmt.Printf("[ShareModel] Failed to clone repository: %v\n", err)
+				}
+				// Clean up partial clone
+				os.RemoveAll(modelPath)
+				return
+			}
+			
+			fmt.Printf("[ShareModel] Repository cloned successfully to %s\n", modelPath)
+			
+			// Remove .git directory to save space
+			gitDir := filepath.Join(modelPath, ".git")
+			if err := os.RemoveAll(gitDir); err != nil {
+				fmt.Printf("[ShareModel] Warning: failed to remove .git directory: %v\n", err)
+			}
+			
+			// Create registry to generate manifest
+			registry, err := models.NewRegistry(paths)
+			if err != nil {
+				fmt.Printf("[ShareModel] Failed to create registry: %v\n", err)
+				return
+			}
+			
+			// Generate manifest for the cloned model
+			manifest := &types.ModelManifest{
+				Name:    modelName,
+				Version: req.Branch,
+				License: "Unknown", // Will be detected from repo if possible
+			}
+			
+			// Try to detect license from common files
+			licenseFiles := []string{"LICENSE", "LICENSE.txt", "LICENSE.md", "LICENCE", "LICENCE.txt", "LICENCE.md"}
+			for _, lf := range licenseFiles {
+				if _, err := os.Stat(filepath.Join(modelPath, lf)); err == nil {
+					// License file exists, could parse it to detect type
+					manifest.License = "See LICENSE file"
+					break
+				}
+			}
+			
+			// Calculate model size
+			var totalSize int64
+			filepath.Walk(modelPath, func(path string, info os.FileInfo, err error) error {
+				if err == nil && !info.IsDir() {
+					totalSize += info.Size()
+				}
+				return nil
+			})
+			manifest.TotalSize = totalSize
+			
+			// Save manifest
+			if err := registry.SaveManifest(manifest); err != nil {
+				fmt.Printf("[ShareModel] Failed to save manifest: %v\n", err)
+				return
+			}
+			
+			// Create torrent
+			torrentPath := filepath.Join(paths.TorrentsDir(), modelName+".torrent")
+			
+			// Ensure torrents directory exists (including parent directories for nested model names)
+			torrentDir := filepath.Dir(torrentPath)
+			if err := os.MkdirAll(torrentDir, 0755); err != nil {
+				fmt.Printf("[ShareModel] Failed to create torrents directory: %v\n", err)
+				return
+			}
+			
+			// Create the torrent file
+			pieceLength := int64(4 * 1024 * 1024) // 4MB pieces
+			if req.PieceLength > 0 {
+				pieceLength = req.PieceLength
+			}
+			
+			infoHash, err := torrent.CreateTorrentFromDirectory(modelPath, torrentPath, pieceLength)
+			if err != nil {
+				fmt.Printf("[ShareModel] Failed to create torrent: %v\n", err)
+				return
+			}
+			
+			fmt.Printf("[ShareModel] Torrent created: %s (InfoHash: %s)\n", torrentPath, infoHash)
+			
+			// Start sharing the model
+			torrentManager := h.daemon.GetTorrentManager()
+			managedTorrent, err := torrentManager.AddTorrent(torrentPath, modelName)
+			if err != nil {
+				fmt.Printf("[ShareModel] Failed to add torrent: %v\n", err)
+				return
+			}
+			
+			// Start seeding
+			if err := torrentManager.StartSeeding(managedTorrent.InfoHash); err != nil {
+				fmt.Printf("[ShareModel] Failed to start seeding: %v\n", err)
+				return
+			}
+			
+			fmt.Printf("[ShareModel] Started sharing model: %s\n", modelName)
+			
+			// Announce on DHT unless disabled
+			if !req.SkipDHT {
+				announcement := types.ModelAnnouncement{
+					Name:     modelName,
+					InfoHash: managedTorrent.InfoHash,
+					Size:     totalSize,
+				}
+				h.daemon.GetDHTManager().AnnounceModel(&announcement)
+				fmt.Printf("[ShareModel] Announced model on DHT: %s\n", modelName)
+			}
+		}()
+		
+		c.JSON(http.StatusAccepted, gin.H{
+			"message": "share operation started",
+			"model_name": modelName,
+			"repo_url": req.RepoURL,
+			"status": "cloning",
 		})
 		return
 	}
@@ -533,47 +746,40 @@ func (h *Handlers) ShareModel(c *gin.Context) {
 	})
 }
 
-// MirrorModelRequest represents a mirror request
-type MirrorModelRequest struct {
-	RepoURL     string `json:"repo_url"`
-	Branch      string `json:"branch"`
-	Depth       int    `json:"depth"`
-	SkipLFS     bool   `json:"skip_lfs"`
-	NoBroadcast bool   `json:"no_broadcast"`
-	AutoShare   bool   `json:"auto_share"`
-}
 
-// MirrorModel mirrors a model from HuggingFace
-func (h *Handlers) MirrorModel(c *gin.Context) {
-	var req MirrorModelRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("invalid request: %v", err),
-		})
-		return
+// parseRepoURL extracts model name from repository URL
+func parseRepoURL(repoURL string) string {
+	// Handle HuggingFace URLs
+	if strings.Contains(repoURL, "huggingface.co") {
+		parts := strings.Split(repoURL, "/")
+		if len(parts) >= 5 {
+			// Format: https://huggingface.co/owner/model
+			return parts[3] + "/" + parts[4]
+		}
 	}
 	
-	// Set defaults
-	if req.Branch == "" {
-		req.Branch = "main"
-	}
-	if req.Depth == 0 {
-		req.Depth = 1
+	// Handle GitHub URLs
+	if strings.Contains(repoURL, "github.com") {
+		parts := strings.Split(repoURL, "/")
+		if len(parts) >= 5 {
+			// Format: https://github.com/owner/repo
+			owner := parts[3]
+			repo := strings.TrimSuffix(parts[4], ".git")
+			return owner + "/" + repo
+		}
 	}
 	
-	// TODO: Implement actual mirroring logic
-	// This would involve:
-	// 1. Parsing the HuggingFace URL
-	// 2. Cloning the repository
-	// 3. Generating manifest
-	// 4. Creating torrent
-	// 5. Starting to share if requested
+	// For other git URLs, try to extract a reasonable name
+	parts := strings.Split(repoURL, "/")
+	if len(parts) >= 2 {
+		modelName := strings.TrimSuffix(parts[len(parts)-1], ".git")
+		if len(parts) >= 3 {
+			return parts[len(parts)-2] + "/" + modelName
+		}
+		return "unknown/" + modelName
+	}
 	
-	c.JSON(http.StatusAccepted, gin.H{
-		"message": "mirror operation started",
-		"repo_url": req.RepoURL,
-		"status": "pending",
-	})
+	return ""
 }
 
 // copyDir recursively copies a directory

@@ -41,7 +41,6 @@ func SetupRoutes(d *daemon.Daemon) *gin.Engine {
 			models.GET("/:name", h.GetModel)
 			models.POST("/download", h.DownloadModel)
 			models.POST("/share", h.ShareModel)
-			models.POST("/mirror", h.MirrorModel)
 			models.DELETE("/:name", h.RemoveModel)
 			
 			// Debug endpoint

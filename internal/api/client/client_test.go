@@ -174,29 +174,6 @@ func TestClientShareModel(t *testing.T) {
 	assert.Equal(t, "started sharing", result["message"])
 }
 
-func TestClientMirrorModel(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/v1/models/mirror", r.URL.Path)
-		assert.Equal(t, "POST", r.Method)
-		
-		var req map[string]interface{}
-		json.NewDecoder(r.Body).Decode(&req)
-		assert.Equal(t, "https://huggingface.co/test", req["repo_url"])
-		assert.Equal(t, "main", req["branch"])
-		
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"message": "mirror operation started",
-			"status":  "pending",
-		})
-	}))
-	defer server.Close()
-	
-	client := NewClient(server.URL)
-	result, err := client.MirrorModel("https://huggingface.co/test", "main", 1, false, false, true)
-	require.NoError(t, err)
-	assert.Equal(t, "pending", result["status"])
-}
 
 func TestClientRemoveModel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

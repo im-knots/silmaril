@@ -166,65 +166,6 @@ func TestShareModelSpecific(t *testing.T) {
 	}
 }
 
-func TestMirrorModel(t *testing.T) {
-	h, d := setupTestHandlers(t)
-	defer d.Shutdown()
-	
-	// Create test router
-	router := gin.New()
-	router.POST("/models/mirror", h.MirrorModel)
-	
-	// Create request body
-	reqBody := MirrorModelRequest{
-		RepoURL: "https://huggingface.co/test/model",
-		Branch:  "main",
-		Depth:   1,
-	}
-	body, _ := json.Marshal(reqBody)
-	
-	// Create request
-	req, _ := http.NewRequest("POST", "/models/mirror", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	
-	// Execute request
-	router.ServeHTTP(w, req)
-	
-	// Check response
-	assert.Equal(t, http.StatusAccepted, w.Code)
-	
-	var response map[string]interface{}
-	err := json.Unmarshal(w.Body.Bytes(), &response)
-	require.NoError(t, err)
-	assert.Contains(t, response, "message")
-	assert.Equal(t, "pending", response["status"])
-}
-
-func TestMirrorModelInvalidRequest(t *testing.T) {
-	h, d := setupTestHandlers(t)
-	defer d.Shutdown()
-	
-	// Create test router
-	router := gin.New()
-	router.POST("/models/mirror", h.MirrorModel)
-	
-	// Create invalid request (missing repo_url)
-	reqBody := map[string]interface{}{
-		"branch": "main",
-	}
-	body, _ := json.Marshal(reqBody)
-	
-	// Create request
-	req, _ := http.NewRequest("POST", "/models/mirror", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	
-	// Execute request
-	router.ServeHTTP(w, req)
-	
-	// Should still accept (repo_url will be empty)
-	assert.Equal(t, http.StatusAccepted, w.Code)
-}
 
 func TestRemoveModel(t *testing.T) {
 	h, d := setupTestHandlers(t)

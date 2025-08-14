@@ -142,6 +142,11 @@ type ShareModelOptions struct {
 	PieceLength  int64
 	SkipDHT      bool
 	SignManifest bool
+	// Repository cloning options
+	RepoURL      string
+	Branch       string
+	Depth        int
+	SkipLFS      bool
 }
 
 // ShareModel starts sharing a model
@@ -156,6 +161,11 @@ func (c *Client) ShareModel(opts ShareModelOptions) (map[string]interface{}, err
 		"piece_length":  opts.PieceLength,
 		"skip_dht":      opts.SkipDHT,
 		"sign_manifest": opts.SignManifest,
+		// Repository cloning fields
+		"repo_url":      opts.RepoURL,
+		"branch":        opts.Branch,
+		"depth":         opts.Depth,
+		"skip_lfs":      opts.SkipLFS,
 	}
 	
 	resp, err := c.post("/api/v1/models/share", payload)
@@ -170,36 +180,12 @@ func (c *Client) ShareModel(opts ShareModelOptions) (map[string]interface{}, err
 	}
 	
 	// Check if response contains an error
-	if resp.StatusCode != http.StatusOK {
+	// Accept both 200 (OK) and 202 (Accepted) as success
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		if _, ok := result["error"].(string); ok {
 			return result, nil // Return the result so caller can check the error
 		}
 		return nil, fmt.Errorf("request failed with status %d", resp.StatusCode)
-	}
-	
-	return result, nil
-}
-
-// MirrorModel mirrors a model from HuggingFace
-func (c *Client) MirrorModel(repoURL, branch string, depth int, skipLFS, noBroadcast, autoShare bool) (map[string]interface{}, error) {
-	payload := map[string]interface{}{
-		"repo_url":     repoURL,
-		"branch":       branch,
-		"depth":        depth,
-		"skip_lfs":     skipLFS,
-		"no_broadcast": noBroadcast,
-		"auto_share":   autoShare,
-	}
-	
-	resp, err := c.post("/api/v1/models/mirror", payload)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
 	}
 	
 	return result, nil
