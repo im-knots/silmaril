@@ -241,6 +241,11 @@ func (ref *BEP44CatalogRef) fetchCatalogRef() error {
 	return fmt.Errorf("catalog reference not found in DHT")
 }
 
+// RefreshCatalog checks for catalog updates from the DHT
+func (ref *BEP44CatalogRef) RefreshCatalog() error {
+	return ref.fetchCatalogRef()
+}
+
 // AddModel adds a model and publishes the new catalog
 func (ref *BEP44CatalogRef) AddModel(name, infoHash string, size int64) error {
 	// First fetch latest catalog to avoid conflicts

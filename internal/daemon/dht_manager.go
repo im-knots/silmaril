@@ -110,79 +110,94 @@ func NewDHTManager(cfg *config.Config, tm *TorrentManager) (*DHTManager, error) 
 		dm.torrentClient = tm.client
 	}
 	
-	// Create BEP44 catalog reference for model discovery
-	fmt.Println("[DHT] Creating BEP44 catalog reference for model discovery...")
-	if dm.torrentClient != nil {
-		dm.catalogRef, err = discovery.NewBEP44CatalogRef(srv, dm.torrentClient)
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("failed to create BEP44 catalog reference: %w", err)
-		}
-		fmt.Println("[DHT] BEP44 catalog reference created with well-known key")
-	} else {
-		fmt.Println("[DHT] Warning: No torrent client available, catalog discovery disabled")
-	}
-
-	// Bootstrap DHT
-	fmt.Println("[DHT] Starting DHT bootstrap process in background...")
-	go dm.bootstrap()
+	// Bootstrap DHT first before creating catalog reference
+	fmt.Println("[DHT] Starting DHT bootstrap process...")
+	dm.bootstrapAndInitCatalog()
 
 	return dm, nil
 }
 
-func (dm *DHTManager) bootstrap() {
-	fmt.Println("[DHT Bootstrap] Starting DHT network bootstrap...")
-	
-	// Use the DHT server's built-in bootstrap method
-	fmt.Println("[DHT Bootstrap] Creating context with 30s timeout...")
-	ctx, cancel := context.WithTimeout(dm.ctx, 30*time.Second)
-	defer cancel()
-	
-	fmt.Println("[DHT Bootstrap] Calling BootstrapContext...")
-	stats, err := dm.dhtServer.BootstrapContext(ctx)
-	if err != nil {
-		fmt.Printf("[DHT Bootstrap] Bootstrap error: %v\n", err)
-		// Continue anyway, might still work
-	} else {
-		fmt.Printf("[DHT Bootstrap] Bootstrap completed successfully\n")
-		fmt.Printf("[DHT Bootstrap] Stats: %+v\n", stats)
-		if stats.NumResponses == 0 {
-			fmt.Println("[DHT Bootstrap] WARNING: No responses from bootstrap nodes!")
-			fmt.Println("[DHT Bootstrap] Possible causes:")
-			fmt.Println("[DHT Bootstrap]   - Firewall blocking UDP port (try: sudo pfctl -d to disable macOS firewall temporarily)")
+func (dm *DHTManager) bootstrapAndInitCatalog() {
+	// Run bootstrap in background
+	go func() {
+		fmt.Println("[DHT Bootstrap] Starting DHT network bootstrap...")
+		
+		// Use the DHT server's built-in bootstrap method
+		fmt.Println("[DHT Bootstrap] Creating context with 30s timeout...")
+		ctx, cancel := context.WithTimeout(dm.ctx, 30*time.Second)
+		defer cancel()
+		
+		fmt.Println("[DHT Bootstrap] Calling BootstrapContext...")
+		stats, err := dm.dhtServer.BootstrapContext(ctx)
+		if err != nil {
+			fmt.Printf("[DHT Bootstrap] Bootstrap error: %v\n", err)
+			// Continue anyway, might still work
+		} else {
+			fmt.Printf("[DHT Bootstrap] Bootstrap completed successfully\n")
+			fmt.Printf("[DHT Bootstrap] Stats: %+v\n", stats)
+			if stats.NumResponses == 0 {
+				fmt.Println("[DHT Bootstrap] WARNING: No responses from bootstrap nodes!")
+				fmt.Println("[DHT Bootstrap] Possible causes:")
+				fmt.Println("[DHT Bootstrap]   - Firewall blocking UDP port (try: sudo pfctl -d to disable macOS firewall temporarily)")
+				fmt.Println("[DHT Bootstrap]   - Network connectivity issues")
+				fmt.Println("[DHT Bootstrap]   - Bootstrap nodes may be down")
+			}
+		}
+		
+		// Give it a moment to stabilize
+		fmt.Println("[DHT Bootstrap] Waiting 2 seconds for stabilization...")
+		time.Sleep(2 * time.Second)
+		
+		// Do some random announces to populate the routing table
+		fmt.Println("[DHT Bootstrap] Performing random announces to populate routing table...")
+		for i := 0; i < 3; i++ {
+			var randomHash [20]byte
+			for j := range randomHash {
+				randomHash[j] = byte(i * 20 + j)
+			}
+			fmt.Printf("[DHT Bootstrap] Announcing random hash %d\n", i+1)
+			dm.dhtServer.Announce(randomHash, 0, true)
+		}
+		
+		// Report final stats
+		nodeCount := dm.GetNodeCount()
+		fmt.Printf("[DHT Bootstrap] DHT initialized with %d nodes\n", nodeCount)
+		if nodeCount == 0 {
+			fmt.Println("[DHT Bootstrap] WARNING: No DHT nodes found after bootstrap!")
+			fmt.Println("[DHT Bootstrap] This may indicate:")
 			fmt.Println("[DHT Bootstrap]   - Network connectivity issues")
-			fmt.Println("[DHT Bootstrap]   - Bootstrap nodes may be down")
+			fmt.Println("[DHT Bootstrap]   - Firewall blocking UDP traffic")
+			fmt.Println("[DHT Bootstrap]   - Bootstrap nodes are unreachable")
 		}
-	}
+		
+		// Now that DHT is ready, create the catalog reference
+		dm.initCatalogAfterBootstrap()
+		
+		// Continue to periodically refresh
+		go dm.periodicBootstrap()
+	}()
+}
+
+func (dm *DHTManager) initCatalogAfterBootstrap() {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
 	
-	// Give it a moment to stabilize
-	fmt.Println("[DHT Bootstrap] Waiting 2 seconds for stabilization...")
-	time.Sleep(2 * time.Second)
-	
-	// Do some random announces to populate the routing table
-	fmt.Println("[DHT Bootstrap] Performing random announces to populate routing table...")
-	for i := 0; i < 3; i++ {
-		var randomHash [20]byte
-		for j := range randomHash {
-			randomHash[j] = byte(i * 20 + j)
+	// Create BEP44 catalog reference for model discovery
+	fmt.Println("[DHT] Creating BEP44 catalog reference for model discovery...")
+	if dm.torrentClient != nil {
+		var err error
+		dm.catalogRef, err = discovery.NewBEP44CatalogRef(dm.dhtServer, dm.torrentClient)
+		if err != nil {
+			fmt.Printf("[DHT] Failed to create BEP44 catalog reference: %v\n", err)
+			return
 		}
-		fmt.Printf("[DHT Bootstrap] Announcing random hash %d\n", i+1)
-		dm.dhtServer.Announce(randomHash, 0, true)
+		fmt.Println("[DHT] BEP44 catalog reference created with well-known key")
+		
+		// Start periodic catalog refresh
+		go dm.periodicCatalogRefresh()
+	} else {
+		fmt.Println("[DHT] Warning: No torrent client available, catalog discovery disabled")
 	}
-	
-	// Report final stats
-	nodeCount := dm.GetNodeCount()
-	fmt.Printf("[DHT Bootstrap] DHT initialized with %d nodes\n", nodeCount)
-	if nodeCount == 0 {
-		fmt.Println("[DHT Bootstrap] WARNING: No DHT nodes found after bootstrap!")
-		fmt.Println("[DHT Bootstrap] This may indicate:")
-		fmt.Println("[DHT Bootstrap]   - Network connectivity issues")
-		fmt.Println("[DHT Bootstrap]   - Firewall blocking UDP traffic")
-		fmt.Println("[DHT Bootstrap]   - Bootstrap nodes are unreachable")
-	}
-	
-	// Continue to periodically refresh
-	go dm.periodicBootstrap()
 }
 
 func (dm *DHTManager) periodicBootstrap() {
@@ -200,6 +215,32 @@ func (dm *DHTManager) periodicBootstrap() {
 				fmt.Printf("Periodic DHT bootstrap error: %v\n", err)
 			}
 			cancel()
+		}
+	}
+}
+
+func (dm *DHTManager) periodicCatalogRefresh() {
+	// Check for catalog updates every 5 minutes
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-dm.ctx.Done():
+			return
+		case <-ticker.C:
+			dm.mu.RLock()
+			catalogRef := dm.catalogRef
+			dm.mu.RUnlock()
+			
+			if catalogRef != nil {
+				fmt.Println("[DHT] Checking for catalog updates...")
+				// Try to fetch the latest catalog reference from DHT
+				// This will update our local catalog if a newer version exists
+				if err := catalogRef.RefreshCatalog(); err != nil {
+					fmt.Printf("[DHT] Failed to refresh catalog: %v\n", err)
+				}
+			}
 		}
 	}
 }
@@ -291,6 +332,13 @@ func (dm *DHTManager) RefreshSeedingModels() error {
 func (dm *DHTManager) DiscoverModels(pattern string) ([]*types.ModelAnnouncement, error) {
 	if dm.catalogRef == nil {
 		return nil, fmt.Errorf("catalog not available")
+	}
+	
+	// Always refresh catalog before searching to get latest updates
+	fmt.Println("[DHT] Refreshing catalog before discovery...")
+	if err := dm.catalogRef.RefreshCatalog(); err != nil {
+		fmt.Printf("[DHT] Warning: failed to refresh catalog: %v\n", err)
+		// Continue with local catalog if refresh fails
 	}
 	
 	// Use catalog for discovery
