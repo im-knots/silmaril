@@ -18,11 +18,12 @@ type DHTManager struct {
 	mu              sync.RWMutex
 	config          *config.Config
 	torrentManager  *TorrentManager
+	torrentClient   *torrent.Client
 	dhtServer       *dht.Server
 	dhtConn         net.PacketConn
 	announcements   map[string]*types.ModelAnnouncement
 	lastAnnounce    map[string]time.Time
-	bep44Catalog    *discovery.BEP44Catalog
+	catalogRef      *discovery.BEP44CatalogRef
 	ctx             context.Context
 	cancel          context.CancelFunc
 }
@@ -104,14 +105,23 @@ func NewDHTManager(cfg *config.Config, tm *TorrentManager) (*DHTManager, error) 
 	
 	fmt.Printf("[DHT] DHT server created and listening on %s\n", conn.LocalAddr())
 
-	// Create BEP44 catalog for model discovery
-	fmt.Println("[DHT] Creating BEP44 catalog for model discovery...")
-	dm.bep44Catalog, err = discovery.NewBEP44Catalog(srv)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to create BEP44 catalog: %w", err)
+	// Get torrent client from torrent manager
+	if tm != nil && tm.client != nil {
+		dm.torrentClient = tm.client
 	}
-	fmt.Println("[DHT] BEP44 catalog created with well-known key")
+	
+	// Create BEP44 catalog reference for model discovery
+	fmt.Println("[DHT] Creating BEP44 catalog reference for model discovery...")
+	if dm.torrentClient != nil {
+		dm.catalogRef, err = discovery.NewBEP44CatalogRef(srv, dm.torrentClient)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("failed to create BEP44 catalog reference: %w", err)
+		}
+		fmt.Println("[DHT] BEP44 catalog reference created with well-known key")
+	} else {
+		fmt.Println("[DHT] Warning: No torrent client available, catalog discovery disabled")
+	}
 
 	// Bootstrap DHT
 	fmt.Println("[DHT] Starting DHT bootstrap process in background...")
@@ -205,14 +215,15 @@ func (dm *DHTManager) AnnounceModel(announcement *types.ModelAnnouncement) error
 	dm.lastAnnounce[announcement.InfoHash] = time.Now()
 	fmt.Printf("[DHTManager] Stored announcement for periodic refresh\n")
 
-	// Add to BEP44 discovery index
-	fmt.Printf("[DHTManager] Adding model to BEP44 discovery index...\n")
-	if err := dm.bep44Catalog.AddModel(announcement.Name, announcement.InfoHash, announcement.Size); err != nil {
-		fmt.Printf("[DHTManager] BEP44 index update failed: %v\n", err)
-		return fmt.Errorf("failed to add model to index: %w", err)
+	// Add to catalog if available
+	if dm.catalogRef != nil {
+		fmt.Printf("[DHTManager] Adding model to catalog torrent...\n")
+		if err := dm.catalogRef.AddModel(announcement.Name, announcement.InfoHash, announcement.Size); err != nil {
+			fmt.Printf("[DHTManager] Catalog update failed: %v\n", err)
+			return fmt.Errorf("failed to add model to catalog: %w", err)
+		}
+		fmt.Printf("[DHTManager] Successfully added model %s to catalog\n", announcement.Name)
 	}
-
-	fmt.Printf("[DHTManager] Successfully added model %s to discovery index\n", announcement.Name)
 	return nil
 }
 
@@ -228,9 +239,11 @@ func (dm *DHTManager) RefreshAnnouncements() error {
 	dm.mu.RUnlock()
 
 	for _, ann := range announcements {
-		if err := dm.bep44Catalog.AddModel(ann.Name, ann.InfoHash, ann.Size); err != nil {
-			fmt.Printf("Failed to refresh announcement for %s: %v\n", ann.Name, err)
-			continue
+		if dm.catalogRef != nil {
+			if err := dm.catalogRef.AddModel(ann.Name, ann.InfoHash, ann.Size); err != nil {
+				fmt.Printf("Failed to refresh announcement for %s: %v\n", ann.Name, err)
+				continue
+			}
 		}
 		
 		dm.mu.Lock()
@@ -261,8 +274,8 @@ func (dm *DHTManager) RefreshSeedingModels() error {
 	for _, mt := range seedingTorrents {
 		fmt.Printf("[DHT] Refreshing catalog entry for seeded model: %s\n", mt.Name)
 		
-		// Use RefreshModel to keep the catalog entry alive
-		if err := dm.bep44Catalog.RefreshModel(mt.Name, mt.InfoHash, 0); err != nil {
+		// Re-add model to keep the catalog entry alive
+		if err := dm.catalogRef.AddModel(mt.Name, mt.InfoHash, 0); err != nil {
 			fmt.Printf("[DHT] Failed to refresh catalog entry for %s: %v\n", mt.Name, err)
 			continue
 		}
@@ -276,8 +289,12 @@ func (dm *DHTManager) RefreshSeedingModels() error {
 }
 
 func (dm *DHTManager) DiscoverModels(pattern string) ([]*types.ModelAnnouncement, error) {
-	// Use BEP44 index for discovery
-	results, err := dm.bep44Catalog.GetModels(pattern)
+	if dm.catalogRef == nil {
+		return nil, fmt.Errorf("catalog not available")
+	}
+	
+	// Use catalog for discovery
+	results, err := dm.catalogRef.GetModels(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover models: %w", err)
 	}
@@ -294,6 +311,11 @@ func (dm *DHTManager) GetNodeCount() int {
 	stats := dm.dhtServer.Stats()
 	fmt.Printf("[DHT] GetNodeCount: Nodes=%d, GoodNodes=%d\n", stats.Nodes, stats.GoodNodes)
 	return stats.Nodes
+}
+
+// GetCatalogRef returns the BEP44 catalog reference manager
+func (dm *DHTManager) GetCatalogRef() *discovery.BEP44CatalogRef {
+	return dm.catalogRef
 }
 
 func (dm *DHTManager) GetStats() map[string]interface{} {
@@ -331,9 +353,11 @@ func (dm *DHTManager) Stop() {
 	dm.cancel()
 	
 	// Final announcement to ensure peers know we're going offline
-	for _, ann := range dm.announcements {
-		// Best effort - don't worry about errors during shutdown
-		_ = dm.bep44Catalog.AddModel(ann.Name, ann.InfoHash, ann.Size)
+	if dm.catalogRef != nil {
+		for _, ann := range dm.announcements {
+			// Best effort - don't worry about errors during shutdown
+			_ = dm.catalogRef.AddModel(ann.Name, ann.InfoHash, ann.Size)
+		}
 	}
 	
 	// Close the DHT connection

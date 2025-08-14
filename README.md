@@ -1,15 +1,19 @@
 # Silmaril - P2P AI Model Distribution
 
-Silmaril is a peer-to-peer distribution system for AI models using BitTorrent. It enables efficient downloading and sharing of models, metadata, and datasets across the bittorrent network.
+Silmaril is a fully decentralized peer-to-peer system for sharing and discovering AI models using BitTorrent. Unlike traditional model hubs that rely on centralized servers, Silmaril distributes both the models AND the discovery catalog through the BitTorrent network itself. This means no central point of failure, no single organization controlling access, and true peer-to-peer model sharing. 
+
+The system uses a "catalog-as-torrent" approach where the model catalog is itself a torrent, with only a tiny reference stored in the DHT. This allows unlimited scaling while maintaining complete decentralization anyone can share models, anyone can discover them, and the network keeps running as long as peers are online.
 
 ## Features
 
 - **P2P Distribution**: Share models using BitTorrent protocol with DHT discovery
+- **Catalog-as-Torrent**: Scalable discovery system using BitTorrent to distribute the model catalog itself
 - **BEP 44 Discovery**: Decentralized model discovery using DHT mutable items (no central tracker needed)
 - **HuggingFace Compatible**: Works with models in HuggingFace format
 - **Dynamic Registry**: Automatically discovers and manages models in your local directory
 - **Git Integration**: Mirror models directly from HuggingFace repositories
 - **Tag-based Search**: Find models by tags like "llama", "mistral", "7b", etc.
+- **Smart Caching**: Efficient catalog caching to minimize network requests
 
 
 ## Installation
@@ -22,7 +26,7 @@ cd silmaril
 make build
 ```
 
-The binary will be available at `./silmaril`.
+The binary will be available at `build/silmaril`.
 
 ## Quick Start
 
@@ -265,20 +269,41 @@ This architecture provides:
 - **Dynamic registry** that scans your models directory at startup
 - **REST API** for daemon/client communication
 
-### BEP 44 Discovery System
+### Discovery System: Catalog-as-Torrent
 
-Silmaril implements BEP 44 (storing arbitrary data in the DHT) for truly decentralized model discovery:
+Silmaril uses a "catalog-as-torrent" approach for scalable, decentralized model discovery:
 
-- **No Central Tracker**: Models are discovered through DHT mutable items, not a central server
-- **Publisher Identity**: Each publisher has an Ed25519 key pair for signing their model indexes
-- **Tag-based Indexes**: Models are automatically categorized by tags (llama, mistral, 7b, etc.)
-- **Automatic Updates**: Publishers can update their model lists without changing DHT keys
+#### How It Works
 
-When you share a model, Silmaril:
-1. Extracts tags from the model name and metadata
-2. Updates your publisher index in the DHT
-3. Signs the update with your private key
-4. Other users can discover your models by searching tags or browsing all models
+1. **Catalog Torrent**: The complete model catalog is stored as a JSON file distributed via BitTorrent
+2. **BEP 44 Reference**: A small reference (84 bytes) containing the catalog torrent's infohash is stored in DHT using BEP 44
+3. **Well-known Key**: All peers use the same DHT key (`silmaril-discovery-v1`) to find the catalog reference
+4. **Smart Caching**: Peers cache the catalog locally and only re-download when the infohash changes
+
+#### Discovery Flow
+
+When you search for models:
+1. Query the well-known DHT key to get the current catalog torrent infohash
+2. Check if you already have this catalog version cached
+3. If not, download the catalog torrent (usually just a few KB)
+4. Search the local catalog for matching models
+5. Download desired models directly via their individual torrents
+
+#### Sharing Flow
+
+When you share a model:
+1. Your model is added to your local catalog
+2. A new catalog torrent is created and seeded
+3. The catalog reference in DHT is updated with the new infohash
+4. Other peers will discover your update and can merge it with their catalogs
+
+#### Benefits
+
+- **Unlimited Scale**: No 1000-byte DHT limit - catalog can contain thousands of models
+- **Efficient**: Only download catalog when it changes, not on every search
+- **Resilient**: Multiple peers seed the catalog for redundancy
+- **Decentralized**: No central server or tracker required
+- **Automatic Refresh**: Daemon periodically refreshes catalog entries for seeded models
 
 ## Model Storage Structure
 

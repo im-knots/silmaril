@@ -2,8 +2,8 @@
   "name": "model-gamma",
   "model_type": "test",
   "architectures": ["TestModel"],
-  "num_parameters": 8563,
-  "hidden_size": 284,
+  "num_parameters": 9496,
+  "hidden_size": 261,
   "num_hidden_layers": 3,
-  "random_seed": 26643
+  "random_seed": 5272
 }

@@ -75,6 +75,13 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	d.transferManager = NewTransferManager(d.torrentManager, d.state)
 
+	// Initialize catalog from existing shared models
+	fmt.Println("[DEBUG] Initializing catalog from shared models...")
+	if err := d.initializeCatalog(); err != nil {
+		// Non-fatal: just log and continue
+		fmt.Printf("Warning: could not initialize catalog: %v\n", err)
+	}
+
 	return d, nil
 }
 
@@ -407,4 +414,35 @@ func (d *Daemon) GetTransferManager() *TransferManager {
 // GetState returns the daemon state
 func (d *Daemon) GetState() *State {
 	return d.state
+}
+
+// initializeCatalog builds the catalog from existing shared models
+func (d *Daemon) initializeCatalog() error {
+	// Get all seeding models from the torrent manager
+	seedingModels := d.torrentManager.GetSeedingModels()
+	if len(seedingModels) == 0 {
+		fmt.Println("[DEBUG] No shared models found, skipping catalog initialization")
+		return nil
+	}
+
+	fmt.Printf("[DEBUG] Found %d shared models to add to catalog\n", len(seedingModels))
+
+	// Add each model to the catalog
+	catalogRef := d.dhtManager.GetCatalogRef()
+	if catalogRef == nil {
+		fmt.Println("[DEBUG] Catalog reference not available, skipping catalog initialization")
+		return nil
+	}
+
+	for _, model := range seedingModels {
+		fmt.Printf("[DEBUG] Adding model to catalog: %s (InfoHash: %s)\n", model.Name, model.InfoHash)
+		
+		if err := catalogRef.AddModel(model.Name, model.InfoHash, 0); err != nil {
+			fmt.Printf("[DEBUG] Failed to add model %s to catalog: %v\n", model.Name, err)
+			// Continue with other models
+		}
+	}
+
+	fmt.Println("[DEBUG] Catalog initialization complete")
+	return nil
 }
