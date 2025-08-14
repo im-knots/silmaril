@@ -1,7 +1,6 @@
 package discovery
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/dht/v2/bep44"
-	"github.com/anacrolix/torrent/bencode"
 	"github.com/silmaril/silmaril/pkg/types"
 )
 
@@ -131,31 +129,38 @@ func (cat *BEP44Catalog) AddModel(name, infoHash string, size int64) error {
 
 // GetModels retrieves models from the catalog
 func (cat *BEP44Catalog) GetModels(pattern string) ([]*types.ModelAnnouncement, error) {
-	cat.mu.RLock()
-	defer cat.mu.RUnlock()
-	
 	fmt.Printf("[BEP44] Searching catalog for pattern: %s\n", pattern)
 	
-	// Try to fetch latest catalog
+	// Try to fetch latest catalog (this needs write access)
 	if err := cat.fetchCatalog(); err != nil {
 		fmt.Printf("[BEP44] Could not refresh catalog: %v\n", err)
 		// Continue with cached version
 	}
+	
+	// Now read the catalog with proper locking
+	cat.mu.RLock()
+	defer cat.mu.RUnlock()
 	
 	if cat.catalog == nil || len(cat.catalog.Models) == 0 {
 		fmt.Printf("[BEP44] No models in catalog\n")
 		return nil, nil
 	}
 	
+	fmt.Printf("[BEP44] Catalog has %d models\n", len(cat.catalog.Models))
+	
 	var results []*types.ModelAnnouncement
 	for name, model := range cat.catalog.Models {
-		if pattern == "" || matchesPattern(name, pattern) {
+		fmt.Printf("[BEP44] Checking model %s against pattern '%s'\n", name, pattern)
+		if matchesPattern(name, pattern) {
+			fmt.Printf("[BEP44] Model %s matches pattern\n", name)
 			results = append(results, &types.ModelAnnouncement{
 				Name:     name,
 				InfoHash: model.InfoHash,
 				Size:     model.Size,
 				Time:     model.Added,
 			})
+		} else {
+			fmt.Printf("[BEP44] Model %s does not match pattern\n", name)
 		}
 	}
 	
@@ -166,18 +171,10 @@ func (cat *BEP44Catalog) GetModels(pattern string) ([]*types.ModelAnnouncement, 
 // publishCatalog publishes the catalog to DHT using BEP 44
 func (cat *BEP44Catalog) publishCatalog() error {
 	// Serialize catalog to JSON (compact)
-	jsonData, err := json.Marshal(cat.catalog)
+	data, err := json.Marshal(cat.catalog)
 	if err != nil {
 		return fmt.Errorf("failed to serialize catalog: %w", err)
 	}
-	
-	// BEP44 values must be bencode-encoded strings
-	var buf bytes.Buffer
-	encoder := bencode.NewEncoder(&buf)
-	if err := encoder.Encode(jsonData); err != nil {
-		return fmt.Errorf("failed to bencode data: %w", err)
-	}
-	data := buf.Bytes()
 	
 	// Check size limit
 	if len(data) > MaxValueSize {
@@ -186,10 +183,10 @@ func (cat *BEP44Catalog) publishCatalog() error {
 		// For now, we'll just warn
 	}
 	
-	fmt.Printf("[BEP44] Publishing catalog (seq: %d, JSON size: %d, bencode size: %d bytes)\n", 
-		cat.sequence, len(jsonData), len(data))
+	fmt.Printf("[BEP44] Publishing catalog (seq: %d, size: %d bytes)\n", cat.sequence, len(data))
 	
-	// Create BEP 44 item with bencode data
+	// Create BEP 44 item with raw JSON data
+	// Note: BEP44 will handle bencode encoding internally
 	item, err := bep44.NewItem(data, nil, cat.sequence, 0, cat.privateKey)
 	if err != nil {
 		return fmt.Errorf("failed to create BEP44 item: %w", err)
@@ -307,48 +304,74 @@ func (cat *BEP44Catalog) fetchCatalog() error {
 		res := result.Reply.R
 		
 		// Parse the value (res.V is bencode.Bytes)
+		// The DHT returns the raw bencode string including length prefix
 		rawData := []byte(res.V)
 		
-		// The data from DHT is bencode-encoded string, we need to decode it
-		// BEP44 values are stored as bencode strings in the format "length:content"
-		decoder := bencode.NewDecoder(bytes.NewReader(rawData))
-		var jsonData []byte
-		if err := decoder.Decode(&jsonData); err != nil {
-			fmt.Printf("[BEP44] Failed to decode bencode from %s: %v\n", addr, err)
+		fmt.Printf("[BEP44] Received data from %s (len: %d)\n", addr, len(rawData))
+		
+		// The data is in bencode string format "length:content"
+		// We need to extract just the content part
+		dataStr := string(rawData)
+		colonIdx := strings.Index(dataStr, ":")
+		if colonIdx == -1 {
+			fmt.Printf("[BEP44] Invalid bencode format from %s\n", addr)
 			continue
 		}
 		
-		fmt.Printf("[BEP44] Received data from %s (len: %d)\n", addr, len(jsonData))
+		// Extract the JSON part after the length prefix
+		data := []byte(dataStr[colonIdx+1:])
 		
-		// Verify signature if we have one (use the original bencode data for verification)
+		// Verify signature if we have one
 		if res.Seq != nil {
-			// Verify using the public key
-			if !bep44.Verify(cat.privateKey.Public().(ed25519.PublicKey), nil, *res.Seq, rawData, res.Sig[:]) {
-				fmt.Printf("[BEP44] Invalid signature from %s\n", addr)
-				continue
+			// The signature verification for BEP44 mutable items
+			// The signature is over the bencoded value that was stored
+			// We use our public key since we're the publisher
+			pubKey := cat.privateKey.Public().(ed25519.PublicKey)
+			
+			// Debug: Let's see what we're trying to verify
+			fmt.Printf("[BEP44] Verifying signature from %s (seq: %d)\n", addr, *res.Seq)
+			fmt.Printf("[BEP44] Data length: raw=%d, json=%d\n", len(rawData), len(data))
+			
+			// BEP44 stores values as bencode strings, so rawData is what was signed
+			if !bep44.Verify(pubKey, nil, *res.Seq, rawData, res.Sig[:]) {
+				// Try with just the JSON data in case of format mismatch
+				if !bep44.Verify(pubKey, nil, *res.Seq, data, res.Sig[:]) {
+					fmt.Printf("[BEP44] Signature verification failed for both formats\n")
+					continue
+				}
+				fmt.Printf("[BEP44] Signature verified with JSON data\n")
+			} else {
+				fmt.Printf("[BEP44] Signature verified with raw bencode data\n")
 			}
 		}
 		
-		// Now parse the JSON data
+		// Parse the JSON data directly
 		var catalog ModelCatalog
-		if err := json.Unmarshal(jsonData, &catalog); err != nil {
+		if err := json.Unmarshal(data, &catalog); err != nil {
 			fmt.Printf("[BEP44] Failed to parse catalog from %s: %v\n", addr, err)
-			// Debug: show first 200 bytes of JSON data to diagnose
-			preview := jsonData
+			// Debug: show first 200 bytes of data to diagnose
+			preview := string(data)
 			if len(preview) > 200 {
 				preview = preview[:200]
 			}
-			fmt.Printf("[BEP44] JSON data preview: %s\n", string(preview))
+			fmt.Printf("[BEP44] Data preview: %s\n", preview)
 			continue
 		}
 		
-		// Update our state if newer
-		if catalog.Sequence > cat.sequence {
+		fmt.Printf("[BEP44] Successfully parsed catalog from %s: seq=%d (our seq=%d), models=%d\n", 
+			addr, catalog.Sequence, cat.sequence, len(catalog.Models))
+		
+		// Update our state if newer or equal (to handle fresh starts) - needs write lock
+		if catalog.Sequence >= cat.sequence {
+			cat.mu.Lock()
 			cat.catalog = &catalog
 			cat.sequence = catalog.Sequence
-			fmt.Printf("[BEP44] Fetched catalog with %d models (seq: %d) from %s\n", 
+			cat.mu.Unlock()
+			fmt.Printf("[BEP44] Updated catalog with %d models (seq: %d) from %s\n", 
 				len(catalog.Models), catalog.Sequence, addr)
 			return nil
+		} else {
+			fmt.Printf("[BEP44] Skipping older catalog (seq %d < %d)\n", catalog.Sequence, cat.sequence)
 		}
 	}
 	
@@ -391,6 +414,10 @@ func extractTags(name string) []string {
 
 // matchesPattern checks if a name matches a search pattern
 func matchesPattern(name, pattern string) bool {
+	// Handle wildcard pattern
+	if pattern == "*" || pattern == "" {
+		return true
+	}
 	return strings.Contains(strings.ToLower(name), strings.ToLower(pattern))
 }
 
