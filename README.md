@@ -160,32 +160,31 @@ Example: `./build/silmaril share test/models/test-org/hello-world --name test-or
 
 ## Configuration
 
-Silmaril uses a configuration file at `~/.config/silmaril/config.yaml`. Here's an example:
+Silmaril uses a configuration file at `~/.config/silmaril/config.yaml`. A complete example is provided in `config.yaml.example`.
+
+Key configuration options:
 
 ```yaml
 storage:
-  base_dir: ~/.silmaril
-  models_dir: ~/.silmaril/models
-
+  base_dir: ~/.silmaril  # Base directory for all data
+  
 network:
-  max_connections: 50
-  upload_rate_limit: 0  # 0 = unlimited
-  download_rate_limit: 0
-  dht_enabled: true
-  dht_port: 0  # 0 = random port (allows multiple instances)
-  listen_port: 0  # 0 = random port
-
+  dht_enabled: true       # Enable DHT for decentralized discovery
+  listen_port: 0          # 0 = random port (recommended)
+  max_connections: 100    # Maximum peer connections
+  disable_trackers: true  # Use DHT instead of trackers
+  
 daemon:
-  port: 8737  # REST API port
-  auto_start: true  # Auto-start daemon when CLI needs it
-
+  port: 8737              # REST API port
+  auto_start: true        # Auto-start daemon when needed
+  
 torrent:
-  piece_length: 4194304  # 4MB
-  download_timeout: 3600  # 1 hour
-
+  piece_length: 4194304   # 4MB pieces for optimal performance
+  download_timeout: 0     # 0 = unlimited
+  
 security:
-  verify_checksums: true
-  sign_manifests: true
+  verify_manifests: true  # Verify model signatures
+  sign_manifests: true    # Sign shared models
 ```
 
 ## Commands Reference

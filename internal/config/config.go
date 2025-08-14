@@ -13,16 +13,16 @@ import (
 type Config struct {
 	// Storage paths
 	Storage StorageConfig `mapstructure:"storage"`
-	
+
 	// Network settings
 	Network NetworkConfig `mapstructure:"network"`
-	
+
+	// Daemon settings
+	Daemon DaemonConfig `mapstructure:"daemon"`
+
 	// Torrent settings
 	Torrent TorrentConfig `mapstructure:"torrent"`
-	
-	// UI settings
-	UI UIConfig `mapstructure:"ui"`
-	
+
 	// Security settings
 	Security SecurityConfig `mapstructure:"security"`
 }
@@ -40,15 +40,28 @@ type NetworkConfig struct {
 	DHTEnabled        bool     `mapstructure:"dht_enabled"`
 	DHTBootstrapNodes []string `mapstructure:"dht_bootstrap_nodes"`
 	DHTPort           int      `mapstructure:"dht_port"`
-	
+
 	// Torrent network settings
 	ListenPort        int   `mapstructure:"listen_port"`
 	MaxConnections    int   `mapstructure:"max_connections"`
 	UploadRateLimit   int64 `mapstructure:"upload_rate_limit"`
 	DownloadRateLimit int64 `mapstructure:"download_rate_limit"`
+
+	// Tracker/peer settings
+	DisableTrackers   bool `mapstructure:"disable_trackers"`
+	DisableWebTorrent bool `mapstructure:"disable_webtorrent"`
+	DisablePEX        bool `mapstructure:"disable_pex"`
 	
-	// Disable trackers (we want DHT only)
-	DisableTrackers bool `mapstructure:"disable_trackers"`
+	// Catalog refresh interval in minutes
+	CatalogRefreshIntervalMinutes int `mapstructure:"catalog_refresh_interval_minutes"`
+}
+
+type DaemonConfig struct {
+	// REST API port
+	Port int `mapstructure:"port"`
+	
+	// Auto-start daemon if not running
+	AutoStart bool `mapstructure:"auto_start"`
 }
 
 type TorrentConfig struct {
@@ -58,13 +71,6 @@ type TorrentConfig struct {
 	DownloadTimeout int     `mapstructure:"download_timeout"`
 }
 
-type UIConfig struct {
-	ProgressBar  bool   `mapstructure:"progress_bar"`
-	Color        bool   `mapstructure:"color"`
-	Verbose      bool   `mapstructure:"verbose"`
-	OutputFormat string `mapstructure:"output_format"`
-}
-
 type SecurityConfig struct {
 	SignManifests   bool   `mapstructure:"sign_manifests"`
 	VerifyManifests bool   `mapstructure:"verify_manifests"`
@@ -72,8 +78,8 @@ type SecurityConfig struct {
 }
 
 var (
-	cfg  *Config
-	v    *viper.Viper
+	cfg *Config
+	v   *viper.Viper
 )
 
 // Helper methods for accessing config values
@@ -113,32 +119,32 @@ func (c *Config) GetStringSlice(key string) []string {
 // Initialize sets up the configuration
 func Initialize() error {
 	v = viper.New()
-	
+
 	// Set config name and type
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
-	
+
 	// Add config paths
 	// 1. Same directory as executable
 	if exe, err := os.Executable(); err == nil {
 		v.AddConfigPath(filepath.Dir(exe))
 	}
-	
+
 	// 2. Current working directory
 	v.AddConfigPath(".")
-	
+
 	// 3. User config directory
 	if configDir := getUserConfigDir(); configDir != "" {
 		v.AddConfigPath(configDir)
 	}
-	
+
 	// Set defaults
 	setDefaults(v)
-	
+
 	// Bind environment variables
 	v.SetEnvPrefix("SILMARIL")
 	v.AutomaticEnv()
-	
+
 	// Read config file if exists
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -146,16 +152,16 @@ func Initialize() error {
 		}
 		// Config file not found is ok, we'll use defaults
 	}
-	
+
 	// Unmarshal into struct
 	cfg = &Config{}
 	if err := v.Unmarshal(cfg); err != nil {
 		return fmt.Errorf("error unmarshaling config: %w", err)
 	}
-	
+
 	// Expand paths
 	expandPaths(cfg)
-	
+
 	return nil
 }
 
@@ -163,11 +169,11 @@ func Initialize() error {
 func setDefaults(v *viper.Viper) {
 	// Storage defaults
 	v.SetDefault("storage.base_dir", getDefaultBaseDir())
-	v.SetDefault("storage.models_dir", "")      // Will be set to base_dir/models
-	v.SetDefault("storage.torrents_dir", "")    // Will be set to base_dir/torrents
-	v.SetDefault("storage.registry_dir", "")    // Will be set to base_dir/registry
-	v.SetDefault("storage.db_dir", "")          // Will be set to base_dir/db
-	
+	v.SetDefault("storage.models_dir", "")   // Will be set to base_dir/models
+	v.SetDefault("storage.torrents_dir", "") // Will be set to base_dir/torrents
+	v.SetDefault("storage.registry_dir", "") // Will be set to base_dir/registry
+	v.SetDefault("storage.db_dir", "")       // Will be set to base_dir/db
+
 	// Network defaults
 	v.SetDefault("network.dht_enabled", true)
 	v.SetDefault("network.dht_bootstrap_nodes", []string{
@@ -175,25 +181,26 @@ func setDefaults(v *viper.Viper) {
 		"dht.transmissionbt.com:6881",
 		"router.utorrent.com:6881",
 	})
-	v.SetDefault("network.dht_port", 0) // Random port
+	v.SetDefault("network.dht_port", 0)    // Random port
 	v.SetDefault("network.listen_port", 0) // Random port
 	v.SetDefault("network.max_connections", 100)
-	v.SetDefault("network.upload_rate_limit", 0) // Unlimited
+	v.SetDefault("network.upload_rate_limit", 0)   // Unlimited
 	v.SetDefault("network.download_rate_limit", 0) // Unlimited
 	v.SetDefault("network.disable_trackers", true)
+	v.SetDefault("network.disable_webtorrent", true)
+	v.SetDefault("network.disable_pex", false)
+	v.SetDefault("network.catalog_refresh_interval_minutes", 30)
 	
+	// Daemon defaults
+	v.SetDefault("daemon.port", 8737)
+	v.SetDefault("daemon.auto_start", true)
+
 	// Torrent defaults
 	v.SetDefault("torrent.piece_length", 4*1024*1024) // 4MB
-	v.SetDefault("torrent.seed_ratio", 0) // Unlimited
-	v.SetDefault("torrent.seed_time", 0) // Unlimited
-	v.SetDefault("torrent.download_timeout", 1800) // 30 minutes
-	
-	// UI defaults
-	v.SetDefault("ui.progress_bar", true)
-	v.SetDefault("ui.color", true)
-	v.SetDefault("ui.verbose", false)
-	v.SetDefault("ui.output_format", "text") // text or json
-	
+	v.SetDefault("torrent.seed_ratio", 0)             // Unlimited
+	v.SetDefault("torrent.seed_time", 0)              // Unlimited
+	v.SetDefault("torrent.download_timeout", 0)       // Unlimited
+
 	// Security defaults
 	v.SetDefault("security.sign_manifests", true)
 	v.SetDefault("security.verify_manifests", true)
@@ -205,12 +212,12 @@ func getDefaultBaseDir() string {
 	if dir := os.Getenv("SILMARIL_HOME"); dir != "" {
 		return dir
 	}
-	
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ".silmaril"
 	}
-	
+
 	return filepath.Join(home, ".silmaril")
 }
 
@@ -220,12 +227,12 @@ func getUserConfigDir() string {
 	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
 		return filepath.Join(xdgConfig, "silmaril")
 	}
-	
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	
+
 	switch runtime.GOOS {
 	case "darwin":
 		return filepath.Join(home, "Library", "Application Support", "silmaril")
@@ -245,32 +252,32 @@ func expandPaths(cfg *Config) {
 	if cfg.Storage.BaseDir != "" {
 		cfg.Storage.BaseDir = expandPath(cfg.Storage.BaseDir)
 	}
-	
+
 	// Set subdirectories if not specified
 	if cfg.Storage.ModelsDir == "" {
 		cfg.Storage.ModelsDir = filepath.Join(cfg.Storage.BaseDir, "models")
 	} else {
 		cfg.Storage.ModelsDir = expandPath(cfg.Storage.ModelsDir)
 	}
-	
+
 	if cfg.Storage.TorrentsDir == "" {
 		cfg.Storage.TorrentsDir = filepath.Join(cfg.Storage.BaseDir, "torrents")
 	} else {
 		cfg.Storage.TorrentsDir = expandPath(cfg.Storage.TorrentsDir)
 	}
-	
+
 	if cfg.Storage.RegistryDir == "" {
 		cfg.Storage.RegistryDir = filepath.Join(cfg.Storage.BaseDir, "registry")
 	} else {
 		cfg.Storage.RegistryDir = expandPath(cfg.Storage.RegistryDir)
 	}
-	
+
 	if cfg.Storage.DBDir == "" {
 		cfg.Storage.DBDir = filepath.Join(cfg.Storage.BaseDir, "db")
 	} else {
 		cfg.Storage.DBDir = expandPath(cfg.Storage.DBDir)
 	}
-	
+
 	if cfg.Security.KeysDir == "" {
 		cfg.Security.KeysDir = filepath.Join(cfg.Storage.BaseDir, "keys")
 	} else {
@@ -283,7 +290,7 @@ func expandPath(path string) string {
 	if path == "" {
 		return path
 	}
-	
+
 	// Expand ~
 	if path[0] == '~' {
 		home, err := os.UserHomeDir()
@@ -291,7 +298,7 @@ func expandPath(path string) string {
 			path = filepath.Join(home, path[1:])
 		}
 	}
-	
+
 	// Expand environment variables
 	return os.ExpandEnv(path)
 }
@@ -327,17 +334,17 @@ func CreateAllDirs() error {
 		cfg.Storage.DBDir,
 		cfg.Security.KeysDir,
 	}
-	
+
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}
-	
+
 	// Keys dir should be more secure
 	if err := os.Chmod(cfg.Security.KeysDir, 0700); err != nil {
 		return fmt.Errorf("failed to secure keys directory: %w", err)
 	}
-	
+
 	return nil
 }

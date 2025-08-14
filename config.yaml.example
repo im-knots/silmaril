@@ -1,96 +1,55 @@
-# Silmaril Configuration File
-# Copy this to ~/.config/silmaril/config.yaml and customize as needed
-# Or run 'silmaril init' to automatically generate this file
-#
-# Architecture Notes:
-# - Silmaril uses a daemon/client architecture
-# - The daemon runs in the background handling all P2P operations
-# - The CLI is a thin client that communicates with the daemon via REST API
-# - Multiple CLI commands can run simultaneously
-# - The daemon maintains persistent DHT connections and continues seeding
+# Silmaril Configuration Example
+# Place this file at ~/.config/silmaril/config.yaml
 
-# Storage configuration
+# Storage settings
 storage:
-  # Base directory for all Silmaril data
-  # Default: ~/.silmaril
+  # Base directory for all Silmaril data (default: ~/.silmaril)
   base_dir: ~/.silmaril
   
-  # Individual directories (leave empty to use defaults under base_dir)
-  models_dir: ""      # Default: base_dir/models
-  torrents_dir: ""    # Default: base_dir/torrents
-  registry_dir: ""    # Default: base_dir/registry
-  db_dir: ""          # Default: base_dir/db
+  # Subdirectories (leave empty to use defaults under base_dir)
+  # models_dir: ~/.silmaril/models
+  # torrents_dir: ~/.silmaril/torrents
+  # registry_dir: ~/.silmaril/registry
+  # db_dir: ~/.silmaril/db
 
-# Network configuration
+# Network settings
 network:
   # DHT (Distributed Hash Table) settings
   dht_enabled: true
+  dht_port: 0  # 0 = random port (recommended for multiple instances)
   dht_bootstrap_nodes:
-    - "router.bittorrent.com:6881"
-    - "dht.transmissionbt.com:6881"
-    - "router.utorrent.com:6881"
-  dht_port: 0  # 0 = random port (allows multiple instances)
-  
-  # BEP 44 Discovery Settings
-  bep44_enabled: true     # Use BEP 44 mutable items for model discovery
-  publisher_key: ""       # Path to Ed25519 private key (auto-generated if empty)
-  refresh_interval: 300   # Seconds between DHT index refreshes
+    - router.bittorrent.com:6881
+    - dht.transmissionbt.com:6881
+    - router.utorrent.com:6881
   
   # BitTorrent network settings
-  listen_port: 0          # 0 = random port (allows multiple instances)
+  listen_port: 0  # 0 = random port
   max_connections: 100
   upload_rate_limit: 0    # bytes/sec, 0 = unlimited
   download_rate_limit: 0  # bytes/sec, 0 = unlimited
   
-  # Tracker usage (we prefer DHT for decentralization)
-  disable_trackers: true   # Set to false if you want to use trackers
-  disable_webtorrent: true # WebTorrent not needed for our use case
-  disable_pex: false       # Peer Exchange helps with discovery
+  # Peer discovery settings
+  disable_trackers: true      # Disable centralized trackers (use DHT instead)
+  disable_webtorrent: true    # Disable WebTorrent support
+  disable_pex: false          # Enable Peer Exchange
+  
+  # Catalog refresh interval in minutes
+  catalog_refresh_interval_minutes: 30
 
-# Torrent configuration
-torrent:
-  piece_length: 4194304   # 4MB pieces
-  seed_ratio: 0           # 0 = unlimited
-  seed_time: 0            # seconds, 0 = unlimited
-  download_timeout: 1800  # 30 minutes
-
-# UI configuration
-ui:
-  progress_bar: true
-  color: true
-  verbose: false
-  output_format: text  # text or json
-
-# Security configuration
-security:
-  sign_manifests: true    # Sign model manifests with Ed25519
-  verify_manifests: true  # Verify signatures on downloaded manifests
-  verify_checksums: true  # Verify file checksums from manifests
-  keys_dir: ""           # Default: base_dir/keys
-
-# Daemon configuration
+# Daemon settings
 daemon:
-  # API server settings
-  port: 8737              # REST API port (like Ollama's 11434)
-  host: 127.0.0.1        # Bind to localhost only for security
-  
-  # Daemon behavior
-  auto_start: true       # CLI auto-starts daemon if not running
-  persist_state: true    # Save state between restarts
-  max_idle_time: 0       # Minutes before daemon auto-stops (0 = never)
-  
-  # Paths
-  log_file: ""           # Default: base_dir/daemon/daemon.log
-  data_dir: ""           # Default: base_dir/daemon
-  pid_file: ""           # Default: base_dir/daemon/daemon.pid
-  state_file: ""         # Default: base_dir/daemon/state.json
-  
-  # Performance
-  cleanup_interval: 3600  # Seconds between cleanup tasks
-  stats_interval: 30      # Seconds between stats updates
+  port: 8737        # REST API port
+  auto_start: true  # Auto-start daemon when CLI needs it
 
-# Remote daemon configuration (optional)
-# Uncomment to connect to a daemon on another machine
-# remote:
-#   url: "http://remote-host:8737"  # Remote daemon URL
-#   auth_token: ""                   # Optional authentication token
+# Torrent settings
+torrent:
+  piece_length: 4194304  # 4MB pieces
+  seed_ratio: 0          # 0 = unlimited seeding
+  seed_time: 0           # seconds, 0 = unlimited
+  download_timeout: 0    # seconds, 0 = unlimited
+
+# Security settings
+security:
+  sign_manifests: true    # Sign model manifests
+  verify_manifests: true  # Verify manifest signatures
+  # keys_dir: ~/.silmaril/keys  # Leave empty to use default

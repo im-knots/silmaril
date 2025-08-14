@@ -105,13 +105,11 @@ func TestSetDefaults(t *testing.T) {
 	// Test torrent defaults
 	assert.Equal(t, int64(4*1024*1024), v.GetInt64("torrent.piece_length"))
 	assert.Equal(t, 0.0, v.GetFloat64("torrent.seed_ratio"))
-	assert.Equal(t, 1800, v.GetInt("torrent.download_timeout"))
+	assert.Equal(t, 0, v.GetInt("torrent.download_timeout"))
 
-	// Test UI defaults
-	assert.True(t, v.GetBool("ui.progress_bar"))
-	assert.True(t, v.GetBool("ui.color"))
-	assert.False(t, v.GetBool("ui.verbose"))
-	assert.Equal(t, "text", v.GetString("ui.output_format"))
+	// Test daemon defaults
+	assert.Equal(t, 8737, v.GetInt("daemon.port"))
+	assert.True(t, v.GetBool("daemon.auto_start"))
 
 	// Test security defaults
 	assert.True(t, v.GetBool("security.sign_manifests"))
@@ -247,8 +245,8 @@ storage:
 network:
   max_connections: 200
   dht_enabled: false
-ui:
-  color: false
+daemon:
+  port: 9999
 `
 	err := os.WriteFile(configFile, []byte(configContent), 0644)
 	require.NoError(t, err)
@@ -276,9 +274,9 @@ ui:
 	assert.Equal(t, "/custom/base", v.GetString("storage.base_dir"))
 	assert.Equal(t, 200, v.GetInt("network.max_connections"))
 	assert.False(t, v.GetBool("network.dht_enabled"))
-	assert.False(t, v.GetBool("ui.color"))
+	assert.Equal(t, 9999, v.GetInt("daemon.port"))
 
 	// Check that defaults are still set for non-overridden values
-	assert.True(t, v.GetBool("ui.progress_bar"))
+	assert.True(t, v.GetBool("daemon.auto_start"))
 	assert.True(t, v.GetBool("security.sign_manifests"))
 }
