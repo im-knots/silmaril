@@ -108,7 +108,7 @@ Seed all your downloaded models to help others:
 silmaril share --all
 ```
 
-Share a specific model by name:
+Share a specific model by name in your models dir:
 
 ```bash
 silmaril share meta-llama/Llama-3.1-8B

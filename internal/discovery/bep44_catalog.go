@@ -21,6 +21,10 @@ const (
 	
 	// Maximum size for BEP 44 value (1000 bytes)
 	MaxValueSize = 1000
+	
+	// Maximum number of models to keep in catalog to stay under size limit
+	// With ~150 bytes per model entry, we can fit about 6-7 models
+	MaxCatalogModels = 10
 )
 
 // BEP44Catalog manages the distributed model catalog using BEP 44 mutable items
@@ -111,6 +115,29 @@ func (cat *BEP44Catalog) AddModel(name, infoHash string, size int64) error {
 		Size:     size,
 		Tags:     extractTags(name),
 		Added:    time.Now().Unix(),
+	}
+	
+	// Limit catalog size by removing oldest entries if needed
+	if len(cat.catalog.Models) > MaxCatalogModels {
+		// Find and remove oldest entries
+		for len(cat.catalog.Models) > MaxCatalogModels {
+			var oldestName string
+			var oldestTime int64 = time.Now().Unix()
+			
+			for modelName, entry := range cat.catalog.Models {
+				if entry.Added < oldestTime {
+					oldestTime = entry.Added
+					oldestName = modelName
+				}
+			}
+			
+			if oldestName != "" && oldestName != name {
+				fmt.Printf("[BEP44] Removing oldest model from catalog to stay under limit: %s\n", oldestName)
+				delete(cat.catalog.Models, oldestName)
+			} else {
+				break
+			}
+		}
 	}
 	
 	// Update catalog metadata

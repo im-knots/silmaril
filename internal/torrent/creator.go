@@ -1,7 +1,7 @@
 package torrent
 
 import (
-	"crypto/sha256"
+	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -105,8 +105,8 @@ func CreateTorrentFromDirectory(sourceDir string, outputPath string, pieceLength
 		return "", fmt.Errorf("failed to write torrent file: %w", err)
 	}
 
-	// Calculate info hash
-	h := sha256.New()
+	// Calculate info hash (BitTorrent uses SHA1)
+	h := sha1.New()
 	h.Write(mi.InfoBytes)
 	infoHash := hex.EncodeToString(h.Sum(nil))
 	

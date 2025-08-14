@@ -1,0 +1,9 @@
+{
+  "name": "model-alpha",
+  "model_type": "test",
+  "architectures": ["TestModel"],
+  "num_parameters": 4654,
+  "hidden_size": 235,
+  "num_hidden_layers": 4,
+  "random_seed": 19157
+}

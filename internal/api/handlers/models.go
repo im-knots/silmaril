@@ -40,10 +40,49 @@ func (h *Handlers) ListModels(c *gin.Context) {
 		return
 	}
 	
-	modelsList := registry.ListModels()
+	// Get model names
+	modelNames := registry.ListModels()
+	
+	// Convert to model details
+	var modelDetails []map[string]interface{}
+	for _, name := range modelNames {
+		manifest, err := registry.GetManifest(name)
+		if err != nil {
+			// Skip models we can't load
+			continue
+		}
+		
+		// Convert manifest to map for API response
+		modelMap := map[string]interface{}{
+			"name":        manifest.Name,
+			"version":     manifest.Version,
+			"description": manifest.Description,
+			"model_type":  manifest.ModelType,
+			"license":     manifest.License,
+		}
+		
+		// Add optional fields if present
+		if manifest.Architecture != "" {
+			modelMap["architecture"] = manifest.Architecture
+		}
+		if manifest.Parameters > 0 {
+			modelMap["parameters"] = manifest.Parameters
+		}
+		if manifest.TotalSize > 0 {
+			modelMap["total_size"] = manifest.TotalSize
+		}
+		if manifest.MagnetURI != "" {
+			modelMap["magnet_uri"] = manifest.MagnetURI
+		}
+		// InferenceHints is a struct, not a pointer, so just add it directly
+		modelMap["inference_hints"] = manifest.InferenceHints
+		
+		modelDetails = append(modelDetails, modelMap)
+	}
+	
 	c.JSON(http.StatusOK, gin.H{
-		"models": modelsList,
-		"count":  len(modelsList),
+		"models": modelDetails,
+		"count":  len(modelDetails),
 	})
 }
 
@@ -180,24 +219,60 @@ func (h *Handlers) ShareModel(c *gin.Context) {
 		
 		modelsList := registry.GetAllManifests()
 		shared := 0
+		var errors []string
+		
 		for _, manifest := range modelsList {
-			// Create seed transfer for each model
-			tm := h.daemon.GetTransferManager()
-			infoHash := manifest.Name // Use model name as identifier for now
-			transfer := tm.CreateSeed(manifest.Name, infoHash)
-			
-			// Start seeding
-			if err := h.daemon.GetTorrentManager().StartSeeding(infoHash); err == nil {
-				shared++
-				transfer.Status = "active"
+			// Look for the torrent file
+			torrentPath := filepath.Join(paths.TorrentsDir(), manifest.Name+".torrent")
+			if _, err := os.Stat(torrentPath); os.IsNotExist(err) {
+				// Try without .torrent extension in case it's already included
+				torrentPath = filepath.Join(paths.TorrentsDir(), manifest.Name)
+				if _, err := os.Stat(torrentPath); os.IsNotExist(err) {
+					errors = append(errors, fmt.Sprintf("%s: torrent file not found", manifest.Name))
+					continue
+				}
 			}
+			
+			// Add torrent to torrent manager
+			torrentManager := h.daemon.GetTorrentManager()
+			managedTorrent, err := torrentManager.AddTorrent(torrentPath, filepath.Join(paths.ModelsDir(), manifest.Name))
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("%s: %v", manifest.Name, err))
+				continue
+			}
+			
+			// Mark as seeding
+			managedTorrent.Seeding = true
+			
+			// Create seed transfer
+			tm := h.daemon.GetTransferManager()
+			transfer := tm.CreateSeed(manifest.Name, managedTorrent.InfoHash)
+			transfer.Status = "active"
+			
+			// Announce to DHT if not skipping
+			if !req.SkipDHT {
+				announcement := &types.ModelAnnouncement{
+					Name:     manifest.Name,
+					InfoHash: managedTorrent.InfoHash,
+					Size:     manifest.TotalSize,
+				}
+				h.daemon.GetDHTManager().AnnounceModel(announcement)
+			}
+			
+			shared++
 		}
 		
-		c.JSON(http.StatusOK, gin.H{
+		response := gin.H{
 			"message":      "started sharing models",
 			"models_shared": shared,
 			"total_models": len(modelsList),
-		})
+		}
+		
+		if len(errors) > 0 {
+			response["warnings"] = errors
+		}
+		
+		c.JSON(http.StatusOK, response)
 		return
 	}
 	
