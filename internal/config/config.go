@@ -57,6 +57,9 @@ type NetworkConfig struct {
 }
 
 type DaemonConfig struct {
+	// REST API bind address
+	BindAddress string `mapstructure:"bind_address"`
+	
 	// REST API port
 	Port int `mapstructure:"port"`
 	
@@ -192,6 +195,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("network.catalog_refresh_interval_minutes", 30)
 	
 	// Daemon defaults
+	v.SetDefault("daemon.bind_address", "0.0.0.0")
 	v.SetDefault("daemon.port", 8737)
 	v.SetDefault("daemon.auto_start", true)
 

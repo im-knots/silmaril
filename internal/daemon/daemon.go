@@ -86,7 +86,11 @@ func New(cfg *config.Config) (*Daemon, error) {
 }
 
 func (d *Daemon) Start(apiPort int) error {
-	fmt.Printf("[DEBUG] Starting daemon on port %d...\n", apiPort)
+	bindAddress := "0.0.0.0"
+	if d.config != nil && d.config.Daemon.BindAddress != "" {
+		bindAddress = d.config.Daemon.BindAddress
+	}
+	fmt.Printf("[DEBUG] Starting daemon on %s:%d...\n", bindAddress, apiPort)
 	
 	// Start background workers
 	fmt.Println("[DEBUG] Starting background workers...")
@@ -102,7 +106,7 @@ func (d *Daemon) Start(apiPort int) error {
 	fmt.Println("[DEBUG] Setting up signal handlers...")
 	d.setupSignalHandlers()
 
-	fmt.Printf("Daemon started on port %d (PID: %d)\n", apiPort, os.Getpid())
+	fmt.Printf("Daemon started on %s:%d (PID: %d)\n", bindAddress, apiPort, os.Getpid())
 	fmt.Printf("[DEBUG] Initial DHT nodes: %d\n", d.dhtManager.GetNodeCount())
 	
 	return nil
@@ -312,8 +316,14 @@ func (d *Daemon) startAPIServer(port int) error {
 		handler = d.setupAPIRoutes()
 	}
 	
+	// Get bind address from config, default to 0.0.0.0
+	bindAddress := "0.0.0.0"
+	if d.config != nil && d.config.Daemon.BindAddress != "" {
+		bindAddress = d.config.Daemon.BindAddress
+	}
+	
 	d.server = &http.Server{
-		Addr:         fmt.Sprintf("127.0.0.1:%d", port),
+		Addr:         fmt.Sprintf("%s:%d", bindAddress, port),
 		Handler:      handler,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,

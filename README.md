@@ -175,6 +175,7 @@ network:
   disable_trackers: true  # Use DHT instead of trackers
   
 daemon:
+  bind_address: 0.0.0.0   # Bind to all interfaces (needed for Docker)
   port: 8737              # REST API port
   auto_start: true        # Auto-start daemon when needed
   

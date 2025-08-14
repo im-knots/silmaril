@@ -108,6 +108,7 @@ func TestSetDefaults(t *testing.T) {
 	assert.Equal(t, 0, v.GetInt("torrent.download_timeout"))
 
 	// Test daemon defaults
+	assert.Equal(t, "0.0.0.0", v.GetString("daemon.bind_address"))
 	assert.Equal(t, 8737, v.GetInt("daemon.port"))
 	assert.True(t, v.GetBool("daemon.auto_start"))
 

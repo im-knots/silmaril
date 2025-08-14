@@ -38,8 +38,9 @@ network:
 
 # Daemon settings
 daemon:
-  port: 8737        # REST API port
-  auto_start: true  # Auto-start daemon when CLI needs it
+  bind_address: 0.0.0.0  # Bind address (0.0.0.0 for all interfaces, needed for Docker)
+  port: 8737             # REST API port
+  auto_start: true       # Auto-start daemon when CLI needs it
 
 # Torrent settings
 torrent:
