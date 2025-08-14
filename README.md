@@ -38,6 +38,20 @@ This will create:
 - `~/.silmaril/` directory structure for models, torrents, and metadata
 - `~/.config/silmaril/config.yaml` with default settings
 
+### 1. Start the Daemon
+
+Silmaril uses a daemon for all P2P operations. Start it before running other commands:
+
+```bash
+silmaril daemon start
+```
+
+Or run in foreground to see logs:
+
+```bash
+silmaril daemon start --foreground
+```
+
 To initialize in a custom location:
 
 ```bash
@@ -50,7 +64,7 @@ To completely remove Silmaril and all downloaded models:
 silmaril init --cleanup
 ```
 
-### 1. Discover Available Models
+### 2. Discover Available Models
 
 Search for models shared by other users on the P2P network:
 
@@ -64,7 +78,7 @@ Search for a specific model:
 silmaril discover llama
 ```
 
-### 2. Download a Model
+### 3. Download a Model
 
 Download a model from the P2P network:
 
@@ -74,7 +88,7 @@ silmaril get meta-llama/Llama-3.1-8B
 
 The model will be downloaded to `~/.silmaril/models/` by default.
 
-### 3. Mirror from HuggingFace
+### 4. Mirror from HuggingFace
 
 Clone a model directly from HuggingFace and automatically share it on the P2P network:
 
@@ -86,7 +100,7 @@ silmaril mirror mistralai/Mistral-7B-v0.1
 
 The model will be automatically seeded after mirroring. Use `--no-auto-share` to disable this.
 
-### 4. Share Your Models
+### 5. Share Your Models
 
 Seed all your downloaded models to help others:
 
@@ -106,7 +120,7 @@ Or share/publish a new model from a directory:
 silmaril share /path/to/model --name org/model --license apache-2.0
 ```
 
-### 5. List Local Models
+### 6. List Local Models
 
 See what models you have downloaded:
 
@@ -114,9 +128,9 @@ See what models you have downloaded:
 silmaril list
 ```
 
-### 6. Daemon Management
+### 7. Daemon Management
 
-The daemon starts automatically when needed, but you can manage it manually:
+The daemon must be running for most Silmaril operations:
 
 ```bash
 # Check daemon status
@@ -149,6 +163,8 @@ This will:
 3. Announce the model on the DHT network
 4. Save to your local registry
 5. Start seeding the model immediately
+
+Example: ./build/silmaril share test/models/test-org/hello-world --name test-org/debug-test --license MIT
 
 ## Configuration
 

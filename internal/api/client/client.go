@@ -131,12 +131,31 @@ func (c *Client) DownloadModel(modelName, infoHash string, seed bool) (map[strin
 	return result, nil
 }
 
+// ShareModelOptions contains options for sharing a model
+type ShareModelOptions struct {
+	ModelName    string
+	Path         string
+	All          bool
+	Name         string // For publishing new models
+	License      string
+	Version      string
+	PieceLength  int64
+	SkipDHT      bool
+	SignManifest bool
+}
+
 // ShareModel starts sharing a model
-func (c *Client) ShareModel(modelName, path string, all bool) (map[string]interface{}, error) {
+func (c *Client) ShareModel(opts ShareModelOptions) (map[string]interface{}, error) {
 	payload := map[string]interface{}{
-		"model_name": modelName,
-		"path":       path,
-		"all":        all,
+		"model_name":    opts.ModelName,
+		"path":          opts.Path,
+		"all":           opts.All,
+		"name":          opts.Name,
+		"license":       opts.License,
+		"version":       opts.Version,
+		"piece_length":  opts.PieceLength,
+		"skip_dht":      opts.SkipDHT,
+		"sign_manifest": opts.SignManifest,
 	}
 	
 	resp, err := c.post("/api/v1/models/share", payload)
@@ -148,6 +167,14 @@ func (c *Client) ShareModel(modelName, path string, all bool) (map[string]interf
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
+	}
+	
+	// Check if response contains an error
+	if resp.StatusCode != http.StatusOK {
+		if _, ok := result["error"].(string); ok {
+			return result, nil // Return the result so caller can check the error
+		}
+		return nil, fmt.Errorf("request failed with status %d", resp.StatusCode)
 	}
 	
 	return result, nil

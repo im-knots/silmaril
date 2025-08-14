@@ -29,6 +29,11 @@ func SetupRoutes(d *daemon.Daemon) *gin.Engine {
 		v1.GET("/health", h.Health)
 		v1.GET("/status", h.Status)
 		
+		// Debug test
+		v1.POST("/test", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"message": "v1 POST test works"})
+		})
+		
 		// Model endpoints
 		models := v1.Group("/models")
 		{
@@ -38,6 +43,11 @@ func SetupRoutes(d *daemon.Daemon) *gin.Engine {
 			models.POST("/share", h.ShareModel)
 			models.POST("/mirror", h.MirrorModel)
 			models.DELETE("/:name", h.RemoveModel)
+			
+			// Debug endpoint
+			models.POST("/test", func(c *gin.Context) {
+				c.JSON(http.StatusOK, gin.H{"message": "POST test works"})
+			})
 		}
 		
 		// Discovery endpoints

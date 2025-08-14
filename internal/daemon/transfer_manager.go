@@ -142,17 +142,38 @@ func (tm *TransferManager) UpdateStats() {
 			continue
 		}
 
-		// Update transfer stats
-		transfer.BytesTransferred = stats["bytes_downloaded"].(int64)
+		// Update transfer stats with safe type conversions
+		if v, ok := stats["bytes_downloaded"].(int64); ok {
+			transfer.BytesTransferred = v
+		}
 		if transfer.Type == TransferTypeUpload || transfer.Type == TransferTypeSeed {
-			transfer.BytesTransferred = stats["bytes_uploaded"].(int64)
+			if v, ok := stats["bytes_uploaded"].(int64); ok {
+				transfer.BytesTransferred = v
+			}
 		}
 		
-		transfer.Progress = stats["progress"].(float64)
-		transfer.DownloadRate = stats["download_rate"].(int64)
-		transfer.UploadRate = stats["upload_rate"].(int64)
-		transfer.Peers = stats["peers"].(int)
-		transfer.Seeders = stats["seeders"].(int)
+		// Handle progress which might be int64 or float64
+		switch v := stats["progress"].(type) {
+		case float64:
+			transfer.Progress = v
+		case int64:
+			transfer.Progress = float64(v)
+		case int:
+			transfer.Progress = float64(v)
+		}
+		
+		if v, ok := stats["download_rate"].(int64); ok {
+			transfer.DownloadRate = v
+		}
+		if v, ok := stats["upload_rate"].(int64); ok {
+			transfer.UploadRate = v
+		}
+		if v, ok := stats["peers"].(int); ok {
+			transfer.Peers = v
+		}
+		if v, ok := stats["seeders"].(int); ok {
+			transfer.Seeders = v
+		}
 		transfer.LastActivity = time.Now()
 
 		// Calculate ETA for downloads

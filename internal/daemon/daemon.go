@@ -26,8 +26,7 @@ type Daemon struct {
 	transferManager *TransferManager
 	state           *State
 	server          *http.Server
-	pidFile         string
-	lockFile        string
+	apiHandler      http.Handler  // Store the API handler
 	workers         sync.WaitGroup
 }
 
@@ -47,22 +46,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 		ctx:      ctx,
 		cancel:   cancel,
 		config:   cfg,
-		pidFile:  filepath.Join(daemonDir, "daemon.pid"),
-		lockFile: filepath.Join(daemonDir, "daemon.lock"),
-	}
-
-	// Check if another daemon is already running
-	fmt.Println("[DEBUG] Checking for existing daemon instances...")
-	if err := d.acquireLock(); err != nil {
-		cancel()
-		return nil, fmt.Errorf("another daemon instance is already running: %w", err)
-	}
-	fmt.Println("[DEBUG] Lock acquired successfully")
-
-	// Write PID file
-	if err := d.writePID(); err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to write PID file: %w", err)
 	}
 
 	// Initialize state
@@ -115,10 +98,7 @@ func (d *Daemon) Start(apiPort int) error {
 	fmt.Printf("Daemon started on port %d (PID: %d)\n", apiPort, os.Getpid())
 	fmt.Printf("[DEBUG] Initial DHT nodes: %d\n", d.dhtManager.GetNodeCount())
 	
-	// Wait for shutdown signal
-	<-d.ctx.Done()
-	
-	return d.Shutdown()
+	return nil
 }
 
 func (d *Daemon) startWorkers() {
@@ -258,48 +238,28 @@ func (d *Daemon) Shutdown() error {
 	// Wait for workers to finish
 	d.workers.Wait()
 
-	// Clean up lock and PID files
-	d.releaseLock()
-	d.removePID()
-
 	fmt.Println("Daemon shutdown complete")
 	return nil
 }
 
-func (d *Daemon) acquireLock() error {
-	lockFile, err := os.OpenFile(d.lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-	if err != nil {
-		if os.IsExist(err) {
-			// Check if the process is still running
-			pidData, _ := os.ReadFile(d.pidFile)
-			return fmt.Errorf("daemon already running (PID: %s)", string(pidData))
-		}
-		return err
-	}
-	lockFile.Close()
-	return nil
-}
-
-func (d *Daemon) releaseLock() {
-	os.Remove(d.lockFile)
-}
-
-func (d *Daemon) writePID() error {
-	pid := fmt.Sprintf("%d", os.Getpid())
-	return os.WriteFile(d.pidFile, []byte(pid), 0644)
-}
-
-func (d *Daemon) removePID() {
-	os.Remove(d.pidFile)
-}
-
 func (d *Daemon) startAPIServer(port int) error {
-	// Import API routes
-	routes := d.setupAPIRoutes()
+	// Use the handler set by SetAPIHandler if available, otherwise use basic routes
+	d.mu.RLock()
+	customHandler := d.apiHandler
+	d.mu.RUnlock()
+	
+	var handler http.Handler
+	if customHandler != nil {
+		fmt.Println("[DEBUG] Using custom API handler")
+		handler = customHandler
+	} else {
+		fmt.Println("[DEBUG] Using basic API routes")
+		handler = d.setupAPIRoutes()
+	}
 	
 	d.server = &http.Server{
 		Addr:         fmt.Sprintf("127.0.0.1:%d", port),
-		Handler:      routes,
+		Handler:      handler,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
@@ -361,6 +321,7 @@ func (d *Daemon) SetAPIHandler(handler http.Handler) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	
+	d.apiHandler = handler
 	if d.server != nil {
 		d.server.Handler = handler
 	}

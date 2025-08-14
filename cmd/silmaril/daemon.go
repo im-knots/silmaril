@@ -3,9 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strconv"
+	"os/signal"
 	"syscall"
 	"time"
 
@@ -13,7 +11,6 @@ import (
 	"github.com/silmaril/silmaril/internal/api/client"
 	"github.com/silmaril/silmaril/internal/config"
 	"github.com/silmaril/silmaril/internal/daemon"
-	"github.com/silmaril/silmaril/internal/storage"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -30,7 +27,7 @@ manages DHT operations, and provides an API for CLI commands.`,
 var daemonStartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the Silmaril daemon",
-	Long: `Start the Silmaril daemon in the background.
+	Long: `Start the Silmaril daemon.
 
 The daemon will:
 - Maintain persistent DHT connections
@@ -38,13 +35,6 @@ The daemon will:
 - Handle download/upload operations
 - Provide an HTTP API on port 8737 (configurable)`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Check if daemon is already running
-		if isDaemonRunning() {
-			fmt.Println("Daemon is already running")
-			return nil
-		}
-
-		foreground, _ := cmd.Flags().GetBool("foreground")
 		port, _ := cmd.Flags().GetInt("port")
 		
 		if port == 0 {
@@ -54,13 +44,36 @@ The daemon will:
 			}
 		}
 
-		if foreground {
-			// Run in foreground
-			return runDaemonForeground(port)
+		// Check if something is already running on this port
+		apiClient := client.NewClient(fmt.Sprintf("http://127.0.0.1:%d", port))
+		if err := apiClient.Health(); err == nil {
+			fmt.Printf("Daemon is already running on port %d\n", port)
+			return nil
 		}
 
-		// Start daemon in background
-		return startDaemonBackground(port)
+		// Create daemon
+		cfg := config.Get()
+		d, err := daemon.New(cfg)
+		if err != nil {
+			return fmt.Errorf("failed to create daemon: %w", err)
+		}
+
+		// Setup API routes and set them on the daemon
+		routes := api.SetupRoutes(d)
+		d.SetAPIHandler(routes)
+		
+		// Start the daemon (this starts all components and the API server)
+		if err := d.Start(port); err != nil {
+			return fmt.Errorf("failed to start daemon: %w", err)
+		}
+		
+		// Wait for interrupt signal
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		<-sigChan
+		
+		fmt.Println("\nShutting down daemon...")
+		return d.Shutdown()
 	},
 }
 
@@ -68,53 +81,34 @@ var daemonStopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the Silmaril daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if !isDaemonRunning() {
+		port, _ := cmd.Flags().GetInt("port")
+		if port == 0 {
+			port = viper.GetInt("daemon.port")
+			if port == 0 {
+				port = 8737 // Default port
+			}
+		}
+
+		// Check if daemon is running by trying the API
+		apiClient := client.NewClient(fmt.Sprintf("http://127.0.0.1:%d", port))
+		if err := apiClient.Health(); err != nil {
 			fmt.Println("Daemon is not running")
 			return nil
 		}
 
-		// Try API shutdown first
-		apiClient := client.NewClient(getDaemonURL())
-		if err := apiClient.Shutdown(); err == nil {
-			fmt.Println("Daemon shutdown initiated via API")
-			time.Sleep(2 * time.Second)
-			if !isDaemonRunning() {
-				fmt.Println("Daemon stopped successfully")
-				return nil
-			}
-		}
-
-		// Fall back to PID-based shutdown
-		pidFile := getPIDFile()
-		pidData, err := os.ReadFile(pidFile)
-		if err != nil {
-			return fmt.Errorf("failed to read PID file: %w", err)
-		}
-
-		pid, err := strconv.Atoi(string(pidData))
-		if err != nil {
-			return fmt.Errorf("invalid PID in file: %w", err)
-		}
-
-		process, err := os.FindProcess(pid)
-		if err != nil {
-			return fmt.Errorf("failed to find process: %w", err)
-		}
-
-		// Send SIGTERM for graceful shutdown
-		if err := process.Signal(syscall.SIGTERM); err != nil {
+		// Shutdown via API
+		if err := apiClient.Shutdown(); err != nil {
 			return fmt.Errorf("failed to stop daemon: %w", err)
 		}
 
-		fmt.Println("Sent shutdown signal to daemon")
+		fmt.Println("Daemon shutdown initiated")
 		
-		// Wait for daemon to stop
-		for i := 0; i < 10; i++ {
-			time.Sleep(1 * time.Second)
-			if !isDaemonRunning() {
-				fmt.Println("Daemon stopped successfully")
-				return nil
-			}
+		// Wait briefly to confirm shutdown
+		time.Sleep(2 * time.Second)
+		if err := apiClient.Health(); err != nil {
+			// Daemon is no longer responding, it has stopped
+			fmt.Println("Daemon stopped successfully")
+			return nil
 		}
 
 		return fmt.Errorf("daemon did not stop within timeout")
@@ -125,20 +119,29 @@ var daemonStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Check daemon status",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if !isDaemonRunning() {
-			fmt.Println("Daemon is not running")
+		port, _ := cmd.Flags().GetInt("port")
+		if port == 0 {
+			port = viper.GetInt("daemon.port")
+			if port == 0 {
+				port = 8737 // Default port
+			}
+		}
+
+		// Check daemon via API
+		apiClient := client.NewClient(fmt.Sprintf("http://127.0.0.1:%d", port))
+		if err := apiClient.Health(); err != nil {
+			fmt.Printf("Daemon is not running on port %d\n", port)
 			return nil
 		}
 
 		// Get status via API
-		apiClient := client.NewClient(getDaemonURL())
 		status, err := apiClient.GetStatus()
 		if err != nil {
-			fmt.Println("Daemon is running but API is not responding")
+			fmt.Printf("Daemon is running on port %d but unable to get status: %v\n", port, err)
 			return nil
 		}
 
-		fmt.Println("Daemon Status:")
+		fmt.Printf("Daemon Status (port %d):\n", port)
 		fmt.Printf("  PID: %v\n", status["pid"])
 		fmt.Printf("  Uptime: %v\n", status["uptime"])
 		fmt.Printf("  Active Transfers: %v\n", status["active_transfers"])
@@ -153,8 +156,18 @@ var daemonRestartCmd = &cobra.Command{
 	Use:   "restart",
 	Short: "Restart the Silmaril daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Stop if running
-		if isDaemonRunning() {
+		port, _ := cmd.Flags().GetInt("port")
+		if port == 0 {
+			port = viper.GetInt("daemon.port")
+			if port == 0 {
+				port = 8737 // Default port
+			}
+		}
+
+		// Check if daemon is running
+		apiClient := client.NewClient(fmt.Sprintf("http://127.0.0.1:%d", port))
+		if err := apiClient.Health(); err == nil {
+			// Daemon is running, stop it first
 			fmt.Println("Stopping daemon...")
 			if err := daemonStopCmd.RunE(cmd, args); err != nil {
 				return err
@@ -173,107 +186,15 @@ func init() {
 	daemonCmd.AddCommand(daemonStartCmd, daemonStopCmd, daemonStatusCmd, daemonRestartCmd)
 	
 	// Flags for daemon start
-	daemonStartCmd.Flags().Bool("foreground", false, "Run daemon in foreground")
 	daemonStartCmd.Flags().Int("port", 0, "API port (default: 8737)")
 	
-	// Flags for daemon restart
-	daemonRestartCmd.Flags().Bool("foreground", false, "Run daemon in foreground after restart")
+	// Flags for other commands
+	daemonStopCmd.Flags().Int("port", 0, "API port (default: 8737)")
+	daemonStatusCmd.Flags().Int("port", 0, "API port (default: 8737)")
 	daemonRestartCmd.Flags().Int("port", 0, "API port (default: 8737)")
 }
 
-func isDaemonRunning() bool {
-	lockFile := getLockFile()
-	if _, err := os.Stat(lockFile); err != nil {
-		return false
-	}
-
-	// Check if process is actually running
-	pidFile := getPIDFile()
-	pidData, err := os.ReadFile(pidFile)
-	if err != nil {
-		return false
-	}
-
-	pid, err := strconv.Atoi(string(pidData))
-	if err != nil {
-		return false
-	}
-
-	// Check if process exists
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-
-	// Send signal 0 to check if process is alive
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
-}
-
-func runDaemonForeground(port int) error {
-	cfg := config.Get()
-	d, err := daemon.New(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to create daemon: %w", err)
-	}
-
-	// Setup API routes
-	routes := api.SetupRoutes(d)
-	d.SetAPIHandler(routes)
-
-	return d.Start(port)
-}
-
-func startDaemonBackground(port int) error {
-	// Get the path to the current executable
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("failed to get executable path: %w", err)
-	}
-
-	// Start daemon as background process
-	cmd := exec.Command(exe, "daemon", "start", "--foreground", "--port", strconv.Itoa(port))
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	
-	// Start the process
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start daemon: %w", err)
-	}
-
-	// Detach from the process
-	if err := cmd.Process.Release(); err != nil {
-		return fmt.Errorf("failed to detach daemon process: %w", err)
-	}
-
-	fmt.Printf("Starting daemon on port %d...\n", port)
-	
-	// Wait for daemon to be ready
-	for i := 0; i < 10; i++ {
-		time.Sleep(1 * time.Second)
-		if isDaemonRunning() {
-			// Check if API is responding
-			apiClient := client.NewClient(fmt.Sprintf("http://127.0.0.1:%d", port))
-			if _, err := apiClient.GetStatus(); err == nil {
-				fmt.Println("Daemon started successfully")
-				return nil
-			}
-		}
-	}
-
-	return fmt.Errorf("daemon failed to start within timeout")
-}
-
-func getLockFile() string {
-	baseDir := storage.GetBaseDir()
-	return filepath.Join(baseDir, "daemon", "daemon.lock")
-}
-
-func getPIDFile() string {
-	baseDir := storage.GetBaseDir()
-	return filepath.Join(baseDir, "daemon", "daemon.pid")
-}
-
+// Helper function to get daemon URL with the specified or default port
 func getDaemonURL() string {
 	port := viper.GetInt("daemon.port")
 	if port == 0 {

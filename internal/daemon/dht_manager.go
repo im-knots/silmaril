@@ -10,7 +10,7 @@ import (
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/torrent"
 	"github.com/silmaril/silmaril/internal/config"
-	"github.com/silmaril/silmaril/internal/federation"
+	"github.com/silmaril/silmaril/internal/discovery"
 	"github.com/silmaril/silmaril/pkg/types"
 )
 
@@ -22,7 +22,7 @@ type DHTManager struct {
 	dhtConn         net.PacketConn
 	announcements   map[string]*types.ModelAnnouncement
 	lastAnnounce    map[string]time.Time
-	bep44Manager    *federation.BEP44Manager
+	bep44Catalog    *discovery.BEP44Catalog
 	ctx             context.Context
 	cancel          context.CancelFunc
 }
@@ -104,14 +104,14 @@ func NewDHTManager(cfg *config.Config, tm *TorrentManager) (*DHTManager, error) 
 	
 	fmt.Printf("[DHT] DHT server created and listening on %s\n", conn.LocalAddr())
 
-	// Create BEP44 manager for discovery
-	fmt.Println("[DHT] Creating BEP44 manager for discovery...")
-	dm.bep44Manager, err = federation.NewBEP44Manager(srv)
+	// Create BEP44 catalog for model discovery
+	fmt.Println("[DHT] Creating BEP44 catalog for model discovery...")
+	dm.bep44Catalog, err = discovery.NewBEP44Catalog(srv)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("failed to create BEP44 manager: %w", err)
+		return nil, fmt.Errorf("failed to create BEP44 catalog: %w", err)
 	}
-	fmt.Println("[DHT] BEP44 manager created")
+	fmt.Println("[DHT] BEP44 catalog created with well-known key")
 
 	// Bootstrap DHT
 	fmt.Println("[DHT] Starting DHT bootstrap process in background...")
@@ -195,27 +195,24 @@ func (dm *DHTManager) periodicBootstrap() {
 }
 
 func (dm *DHTManager) AnnounceModel(announcement *types.ModelAnnouncement) error {
+	fmt.Printf("[DHTManager] AnnounceModel called for: %s (InfoHash: %s)\n", announcement.Name, announcement.InfoHash)
+	
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
 	// Store announcement for refresh
 	dm.announcements[announcement.InfoHash] = announcement
 	dm.lastAnnounce[announcement.InfoHash] = time.Now()
+	fmt.Printf("[DHTManager] Stored announcement for periodic refresh\n")
 
-	// Convert to manifest for DHT announcement
-	manifest := &types.ModelManifest{
-		Name:      announcement.Name,
-		Version:   announcement.Version,
-		MagnetURI: announcement.Magnet,
-		Size:      announcement.Size,
+	// Add to BEP44 discovery index
+	fmt.Printf("[DHTManager] Adding model to BEP44 discovery index...\n")
+	if err := dm.bep44Catalog.AddModel(announcement.Name, announcement.InfoHash, announcement.Size); err != nil {
+		fmt.Printf("[DHTManager] BEP44 index update failed: %v\n", err)
+		return fmt.Errorf("failed to add model to index: %w", err)
 	}
 
-	// Announce to DHT using BEP44
-	if err := dm.bep44Manager.PublishModel(manifest, announcement.InfoHash); err != nil {
-		return fmt.Errorf("failed to announce model: %w", err)
-	}
-
-	fmt.Printf("Announced model %s to DHT\n", announcement.Name)
+	fmt.Printf("[DHTManager] Successfully added model %s to discovery index\n", announcement.Name)
 	return nil
 }
 
@@ -231,14 +228,7 @@ func (dm *DHTManager) RefreshAnnouncements() error {
 	dm.mu.RUnlock()
 
 	for _, ann := range announcements {
-		// Convert to manifest for DHT announcement
-		manifest := &types.ModelManifest{
-			Name:      ann.Name,
-			Version:   ann.Version,
-			MagnetURI: ann.Magnet,
-			Size:      ann.Size,
-		}
-		if err := dm.bep44Manager.PublishModel(manifest, ann.InfoHash); err != nil {
+		if err := dm.bep44Catalog.AddModel(ann.Name, ann.InfoHash, ann.Size); err != nil {
 			fmt.Printf("Failed to refresh announcement for %s: %v\n", ann.Name, err)
 			continue
 		}
@@ -254,27 +244,10 @@ func (dm *DHTManager) RefreshAnnouncements() error {
 }
 
 func (dm *DHTManager) DiscoverModels(pattern string) ([]*types.ModelAnnouncement, error) {
-	ctx, cancel := context.WithTimeout(dm.ctx, 30*time.Second)
-	defer cancel()
-
-	// Use BEP44 discovery
-	models, err := dm.bep44Manager.DiscoverModels(ctx, pattern)
+	// Use BEP44 index for discovery
+	results, err := dm.bep44Catalog.GetModels(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover models: %w", err)
-	}
-
-	// Convert models to announcements
-	var results []*types.ModelAnnouncement
-	for _, m := range models {
-		ann := &types.ModelAnnouncement{
-			Name:     m.Name,
-			Version:  m.Version,
-			InfoHash: m.InfoHash,
-			Magnet:   m.MagnetURI,
-			Size:     m.Size,
-			Time:     m.Added.Unix(),
-		}
-		results = append(results, ann)
 	}
 
 	return results, nil
@@ -327,15 +300,8 @@ func (dm *DHTManager) Stop() {
 	
 	// Final announcement to ensure peers know we're going offline
 	for _, ann := range dm.announcements {
-		// Convert to manifest for final announcement
-		manifest := &types.ModelManifest{
-			Name:      ann.Name,
-			Version:   ann.Version,
-			MagnetURI: ann.Magnet,
-			Size:      ann.Size,
-		}
 		// Best effort - don't worry about errors during shutdown
-		_ = dm.bep44Manager.PublishModel(manifest, ann.InfoHash)
+		_ = dm.bep44Catalog.AddModel(ann.Name, ann.InfoHash, ann.Size)
 	}
 	
 	// Close the DHT connection

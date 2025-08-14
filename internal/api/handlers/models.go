@@ -2,13 +2,16 @@ package handlers
 
 import (
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/silmaril/silmaril/internal/models"
 	"github.com/silmaril/silmaril/internal/storage"
+	"github.com/silmaril/silmaril/internal/torrent"
 	"github.com/silmaril/silmaril/pkg/types"
 )
 
@@ -128,9 +131,16 @@ func (h *Handlers) DownloadModel(c *gin.Context) {
 
 // ShareModelRequest represents a share request
 type ShareModelRequest struct {
-	ModelName string `json:"model_name"`
-	Path      string `json:"path"`
-	All       bool   `json:"all"`
+	ModelName    string `json:"model_name"`
+	Path         string `json:"path"`
+	All          bool   `json:"all"`
+	// Publishing parameters (when sharing from directory)
+	Name         string `json:"name"`         // Model name for new models
+	License      string `json:"license"`      // License for new models
+	Version      string `json:"version"`      // Version for new models
+	PieceLength  int64  `json:"piece_length"` // Piece length for torrent
+	SkipDHT      bool   `json:"skip_dht"`      // Skip DHT announcement
+	SignManifest bool   `json:"sign_manifest"` // Sign the manifest
 }
 
 // ShareModel starts sharing a model
@@ -256,11 +266,189 @@ func (h *Handlers) ShareModel(c *gin.Context) {
 		return
 	}
 	
-	// Share from path (new model)
+	// Share from path (publish new model from directory)
 	if req.Path != "" {
-		// This would involve creating a torrent, which requires more implementation
-		c.JSON(http.StatusNotImplemented, gin.H{
-			"error": "sharing from path not yet implemented",
+		fmt.Printf("[ShareModel] Publishing model from directory: %s\n", req.Path)
+		
+		// For publishing new models, Name and License are required
+		if req.Name == "" || req.License == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "name and license are required when publishing from directory",
+			})
+			return
+		}
+		fmt.Printf("[ShareModel] Model name: %s, License: %s, Version: %s\n", req.Name, req.License, req.Version)
+
+		// Verify path exists and is a directory
+		info, err := os.Stat(req.Path)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf("path not found: %v", err),
+			})
+			return
+		}
+		if !info.IsDir() {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "path must be a directory",
+			})
+			return
+		}
+
+		// Get storage paths
+		paths, err := storage.NewPaths()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("failed to initialize paths: %v", err),
+			})
+			return
+		}
+
+		// Create registry to generate manifest
+		registry, err := models.NewRegistry(paths)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("failed to create registry: %v", err),
+			})
+			return
+		}
+
+		// Copy model to models directory if not already there
+		modelPath := paths.ModelPath(req.Name)
+		if req.Path != modelPath {
+			// Create parent directory
+			if err := os.MkdirAll(filepath.Dir(modelPath), 0755); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": fmt.Sprintf("failed to create model directory: %v", err),
+				})
+				return
+			}
+
+			// Copy directory contents
+			if err := copyDir(req.Path, modelPath); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": fmt.Sprintf("failed to copy model: %v", err),
+				})
+				return
+			}
+		}
+
+		// Scan to pick up the new model
+		if err := registry.ScanModels(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("failed to scan models: %v", err),
+			})
+			return
+		}
+		
+		// Get or generate manifest for the model
+		manifest, err := registry.GetManifest(req.Name)
+		if err != nil {
+			// Model not found, need to refresh
+			if err := registry.RefreshModel(req.Name); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": fmt.Sprintf("failed to generate manifest: %v", err),
+				})
+				return
+			}
+			manifest, err = registry.GetManifest(req.Name)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": fmt.Sprintf("failed to get manifest: %v", err),
+				})
+				return
+			}
+		}
+		
+		// Update manifest with provided metadata
+		manifest.License = req.License
+		if req.Version != "" {
+			manifest.Version = req.Version
+		}
+
+		// Create torrent file
+		torrentPath := paths.TorrentPath(req.Name)
+		fmt.Printf("[ShareModel] Creating torrent at: %s\n", torrentPath)
+		if err := os.MkdirAll(filepath.Dir(torrentPath), 0755); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("failed to create torrent directory: %v", err),
+			})
+			return
+		}
+
+		fmt.Printf("[ShareModel] Generating torrent from directory: %s\n", modelPath)
+		infoHash, err := torrent.CreateTorrentFromDirectory(modelPath, torrentPath, req.PieceLength)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("failed to create torrent: %v", err),
+			})
+			return
+		}
+		fmt.Printf("[ShareModel] Torrent created with InfoHash: %s\n", infoHash)
+
+		// Save manifest to disk
+		if err := registry.SaveManifest(manifest); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("failed to save manifest: %v", err),
+			})
+			return
+		}
+
+		// Add torrent to torrent manager for seeding
+		tm := h.daemon.GetTorrentManager()
+		fmt.Printf("[ShareModel] Adding torrent to torrent manager\n")
+		managedTorrent, err := tm.AddTorrent(torrentPath, req.Name)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("failed to add torrent: %v", err),
+			})
+			return
+		}
+		fmt.Printf("[ShareModel] Torrent added to manager with InfoHash: %s\n", managedTorrent.InfoHash)
+		
+		// Start seeding
+		fmt.Printf("[ShareModel] Starting seeding for model: %s\n", req.Name)
+		if err := tm.StartSeeding(managedTorrent.InfoHash); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("failed to start seeding: %v", err),
+			})
+			return
+		}
+		fmt.Printf("[ShareModel] Seeding started successfully\n")
+
+		// Announce to DHT (both regular DHT and BEP44)
+		fmt.Printf("[ShareModel] Announcing model to DHT\n")
+		dhtManager := h.daemon.GetDHTManager()
+		if !req.SkipDHT {
+			// Create announcement for BEP44 discovery
+			announcement := &types.ModelAnnouncement{
+				Name:     req.Name,
+				InfoHash: managedTorrent.InfoHash,
+				Size:     manifest.TotalSize,
+				Version:  req.Version,
+			}
+			fmt.Printf("[ShareModel] Creating BEP44 announcement for model: %s\n", req.Name)
+			if err := dhtManager.AnnounceModel(announcement); err != nil {
+				fmt.Printf("[ShareModel] Warning: BEP44 announcement failed: %v\n", err)
+			} else {
+				fmt.Printf("[ShareModel] BEP44 announcement successful\n")
+			}
+			
+			// Regular DHT announcement happens automatically via BitTorrent client
+			fmt.Printf("[ShareModel] Regular DHT announcement will be handled by BitTorrent client\n")
+		} else {
+			fmt.Printf("[ShareModel] Skipping DHT announcement (--skip-dht flag)\n")
+		}
+
+		// Create transfer entry
+		transferManager := h.daemon.GetTransferManager()
+		transfer := transferManager.CreateSeed(req.Name, managedTorrent.InfoHash)
+		transfer.Status = "active"
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":     "model published and seeding started",
+			"model_name":  req.Name,
+			"info_hash":   infoHash,
+			"transfer_id": transfer.ID,
 		})
 		return
 	}
@@ -310,6 +498,43 @@ func (h *Handlers) MirrorModel(c *gin.Context) {
 		"message": "mirror operation started",
 		"repo_url": req.RepoURL,
 		"status": "pending",
+	})
+}
+
+// copyDir recursively copies a directory
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Get relative path
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+
+		dstPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(dstPath, info.Mode())
+		}
+
+		// Copy file
+		srcFile, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer srcFile.Close()
+
+		dstFile, err := os.Create(dstPath)
+		if err != nil {
+			return err
+		}
+		defer dstFile.Close()
+
+		_, err = io.Copy(dstFile, srcFile)
+		return err
 	})
 }
 

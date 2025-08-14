@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -85,39 +83,6 @@ func ensureDaemonRunning() error {
 		return nil // Already running
 	}
 
-	// Auto-start is disabled if explicitly set to false
-	if viper.IsSet("daemon.auto_start") && !viper.GetBool("daemon.auto_start") {
-		return fmt.Errorf("daemon is not running. Start it with: silmaril daemon start")
-	}
-
-	// Start daemon in background
-	fmt.Println("Starting daemon...")
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("failed to get executable path: %w", err)
-	}
-
-	cmd := exec.Command(exe, "daemon", "start")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start daemon: %w", err)
-	}
-
-	// Detach from the process
-	if err := cmd.Process.Release(); err != nil {
-		return fmt.Errorf("failed to detach daemon process: %w", err)
-	}
-
-	// Wait for daemon to be ready
-	for i := 0; i < 10; i++ {
-		time.Sleep(1 * time.Second)
-		if err := apiClient.Health(); err == nil {
-			fmt.Println("Daemon started successfully")
-			return nil
-		}
-	}
-
-	return fmt.Errorf("daemon failed to start within timeout")
+	// Daemon is not running - tell the user to start it
+	return fmt.Errorf("daemon is not running\n\nStart the daemon with:\n  silmaril daemon start\n\nOr run in foreground with:\n  silmaril daemon start --foreground")
 }
