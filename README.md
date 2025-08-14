@@ -4,6 +4,8 @@ Silmaril is a fully decentralized peer-to-peer system for sharing and discoverin
 
 The system uses a "catalog-as-torrent" approach where the model catalog is itself a torrent, with only a tiny reference stored in the DHT. This allows unlimited scaling while maintaining complete decentralization anyone can share models, anyone can discover them, and the network keeps running as long as peers are online.
 
+Note: This is a work in progress. Silmaril network stability and model catalog persistence will be addressed with bootstrap nodes in the future
+
 ## Features
 
 - **P2P Distribution**: Share models using BitTorrent protocol with DHT discovery
