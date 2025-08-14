@@ -243,6 +243,38 @@ func (dm *DHTManager) RefreshAnnouncements() error {
 	return nil
 }
 
+// RefreshSeedingModels refreshes the BEP44 catalog entries for currently seeded models
+func (dm *DHTManager) RefreshSeedingModels() error {
+	fmt.Println("[DHT] Starting periodic catalog refresh for seeded models...")
+	
+	// Get currently seeded models from torrent manager
+	seedingTorrents := dm.torrentManager.GetSeedingModels()
+	if len(seedingTorrents) == 0 {
+		fmt.Println("[DHT] No models currently seeding, skipping catalog refresh")
+		return nil
+	}
+	
+	fmt.Printf("[DHT] Found %d seeding models to refresh in catalog\n", len(seedingTorrents))
+	
+	// Refresh each seeded model in the catalog
+	refreshed := 0
+	for _, mt := range seedingTorrents {
+		fmt.Printf("[DHT] Refreshing catalog entry for seeded model: %s\n", mt.Name)
+		
+		// Use RefreshModel to keep the catalog entry alive
+		if err := dm.bep44Catalog.RefreshModel(mt.Name, mt.InfoHash, 0); err != nil {
+			fmt.Printf("[DHT] Failed to refresh catalog entry for %s: %v\n", mt.Name, err)
+			continue
+		}
+		
+		refreshed++
+		fmt.Printf("[DHT] Successfully refreshed catalog entry for %s\n", mt.Name)
+	}
+	
+	fmt.Printf("[DHT] Catalog refresh complete: %d/%d models refreshed\n", refreshed, len(seedingTorrents))
+	return nil
+}
+
 func (dm *DHTManager) DiscoverModels(pattern string) ([]*types.ModelAnnouncement, error) {
 	// Use BEP44 index for discovery
 	results, err := dm.bep44Catalog.GetModels(pattern)

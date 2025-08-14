@@ -429,6 +429,14 @@ func min(a, b int) int {
 	return b
 }
 
+// RefreshModel refreshes a specific model in the catalog to keep it alive
+func (cat *BEP44Catalog) RefreshModel(name, infoHash string, size int64) error {
+	fmt.Printf("[BEP44] Refreshing model in catalog: %s (infohash: %s)\n", name, infoHash)
+	
+	// AddModel will update the sequence number and republish, keeping the entry alive
+	return cat.AddModel(name, infoHash, size)
+}
+
 // Close shuts down the catalog
 func (cat *BEP44Catalog) Close() {
 	cat.cancel()

@@ -106,6 +106,10 @@ func (d *Daemon) startWorkers() {
 	d.workers.Add(1)
 	go d.dhtAnnouncementWorker()
 
+	// Catalog refresh worker
+	d.workers.Add(1)
+	go d.catalogRefreshWorker()
+
 	// State persistence worker
 	d.workers.Add(1)
 	go d.statePersistenceWorker()
@@ -131,6 +135,50 @@ func (d *Daemon) dhtAnnouncementWorker() {
 		case <-ticker.C:
 			if err := d.dhtManager.RefreshAnnouncements(); err != nil {
 				fmt.Printf("Error refreshing DHT announcements: %v\n", err)
+			}
+		}
+	}
+}
+
+func (d *Daemon) catalogRefreshWorker() {
+	defer d.workers.Done()
+	
+	// Make interval configurable, default to 30 minutes
+	interval := 30 * time.Minute
+	if d.config != nil {
+		if configInterval := d.config.GetInt("network.catalog_refresh_interval_minutes"); configInterval > 0 {
+			interval = time.Duration(configInterval) * time.Minute
+			fmt.Printf("[Daemon] Using configured catalog refresh interval: %v\n", interval)
+		} else {
+			fmt.Printf("[Daemon] Using default catalog refresh interval: %v\n", interval)
+		}
+	}
+	
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	
+	// Do an initial refresh after a short delay to allow daemon to stabilize
+	initialDelay := 2 * time.Minute
+	fmt.Printf("[Daemon] Catalog refresh worker started, initial refresh in %v, then every %v\n", initialDelay, interval)
+	
+	select {
+	case <-d.ctx.Done():
+		return
+	case <-time.After(initialDelay):
+		fmt.Println("[Daemon] Running initial catalog refresh...")
+		if err := d.dhtManager.RefreshSeedingModels(); err != nil {
+			fmt.Printf("[Daemon] Error in initial catalog refresh: %v\n", err)
+		}
+	}
+	
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+			fmt.Println("[Daemon] Running periodic catalog refresh...")
+			if err := d.dhtManager.RefreshSeedingModels(); err != nil {
+				fmt.Printf("[Daemon] Error refreshing seeded models catalog: %v\n", err)
 			}
 		}
 	}

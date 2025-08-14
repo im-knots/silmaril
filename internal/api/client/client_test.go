@@ -165,7 +165,11 @@ func TestClientShareModel(t *testing.T) {
 	defer server.Close()
 	
 	client := NewClient(server.URL)
-	result, err := client.ShareModel("test-model", "", false)
+	result, err := client.ShareModel(ShareModelOptions{
+		ModelName: "test-model",
+		Path:      "",
+		All:       false,
+	})
 	require.NoError(t, err)
 	assert.Equal(t, "started sharing", result["message"])
 }

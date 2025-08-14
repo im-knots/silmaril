@@ -264,3 +264,17 @@ func (tm *TorrentManager) Stop() {
 func (tm *TorrentManager) GetClient() *torrent.Client {
 	return tm.client
 }
+
+// GetSeedingModels returns a list of currently seeded models
+func (tm *TorrentManager) GetSeedingModels() []*ManagedTorrent {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	
+	var seedingTorrents []*ManagedTorrent
+	for _, mt := range tm.torrents {
+		if mt.Seeding {
+			seedingTorrents = append(seedingTorrents, mt)
+		}
+	}
+	return seedingTorrents
+}
