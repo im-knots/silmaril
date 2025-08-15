@@ -128,6 +128,10 @@ func (d *Daemon) startWorkers() {
 	// Cleanup worker
 	d.workers.Add(1)
 	go d.cleanupWorker()
+	
+	// Seeding status reporter
+	d.workers.Add(1)
+	go d.seedingStatusWorker()
 
 	// Stats collection worker
 	d.workers.Add(1)
@@ -229,6 +233,76 @@ func (d *Daemon) statsWorker() {
 			d.transferManager.UpdateStats()
 		}
 	}
+}
+
+func (d *Daemon) seedingStatusWorker() {
+	defer d.workers.Done()
+	
+	// Report seeding status every minute
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	
+	// Initial delay to let everything initialize
+	time.Sleep(10 * time.Second)
+	
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+			d.reportSeedingStatus()
+		}
+	}
+}
+
+func (d *Daemon) reportSeedingStatus() {
+	// Get all torrents from the torrent manager
+	torrents := d.torrentManager.client.Torrents()
+	
+	if len(torrents) == 0 {
+		return // No need to report if no torrents
+	}
+	
+	fmt.Println("[Seeding Status] ========================================")
+	fmt.Printf("[Seeding Status] Total torrents: %d\n", len(torrents))
+	
+	seedingCount := 0
+	for _, t := range torrents {
+		if t.Seeding() {
+			seedingCount++
+			stats := t.Stats()
+			name := t.Name()
+			if name == "" {
+				// For catalog torrents with no name
+				name = "catalog"
+			}
+			fmt.Printf("[Seeding Status] • %s: %s (peers: %d, uploaded: %s)\n",
+				name,
+				t.InfoHash().HexString()[:8],
+				stats.ActivePeers,
+				formatBytes(stats.BytesWrittenData.Int64()))
+		}
+	}
+	
+	fmt.Printf("[Seeding Status] Currently seeding: %d torrents\n", seedingCount)
+	
+	// Also report catalog status specifically
+	// (The catalog torrent should be in the torrents list above)
+	
+	fmt.Println("[Seeding Status] ========================================")
+}
+
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 func (d *Daemon) cleanupIncompleteDownloads() {

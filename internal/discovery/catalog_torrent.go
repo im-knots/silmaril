@@ -71,6 +71,37 @@ func NewCatalogTorrent(torrentClient *torrent.Client) (*CatalogTorrent, error) {
 	// Try to load existing catalog
 	if err := ct.loadCatalog(); err != nil {
 		fmt.Printf("[CatalogTorrent] No existing catalog found: %v\n", err)
+	} else {
+		// If we have a catalog, check if we have a torrent file to seed
+		// Look for the most recent catalog torrent file
+		files, err := os.ReadDir(catalogDir)
+		if err == nil {
+			var latestTorrent string
+			var latestSeq int64
+			for _, file := range files {
+				if filepath.Ext(file.Name()) == ".torrent" && file.Name() != "catalog.torrent" {
+					// Extract sequence number from filename like "catalog_1.torrent"
+					var seq int64
+					if _, err := fmt.Sscanf(file.Name(), "catalog_%d.torrent", &seq); err == nil {
+						if seq > latestSeq {
+							latestSeq = seq
+							latestTorrent = filepath.Join(catalogDir, file.Name())
+						}
+					}
+				}
+			}
+			
+			if latestTorrent != "" {
+				fmt.Printf("[CatalogTorrent] Found existing catalog torrent: %s (seq: %d)\n", latestTorrent, latestSeq)
+				ct.torrentFile = latestTorrent
+				// Start seeding the existing catalog
+				if err := ct.StartSeeding(); err != nil {
+					fmt.Printf("[CatalogTorrent] Warning: failed to start seeding existing catalog: %v\n", err)
+				} else {
+					fmt.Printf("[CatalogTorrent] Successfully started seeding existing catalog\n")
+				}
+			}
+		}
 	}
 	
 	return ct, nil
@@ -238,20 +269,37 @@ func (ct *CatalogTorrent) AddModel(name, infoHash string, size int64) (string, e
 		return "", fmt.Errorf("failed to load catalog torrent metainfo: %w", err)
 	}
 	
-	// Create storage specifically for the catalog directory
-	// The catalog files are in ct.catalogDir, not in the default models dir
-	catalogStorage := torrentStorage.NewFile(ct.catalogDir)
+	// Create storage that puts files directly in the catalog directory
+	// Since the torrent has no name, files will be placed directly in the base dir
+	catalogStorage := torrentStorage.NewFileOpts(torrentStorage.NewFileClientOpts{
+		ClientBaseDir: ct.catalogDir,
+		TorrentDirMaker: func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
+			// Return the base dir itself, not a subdirectory
+			return baseDir
+		},
+	})
 	
 	// Add torrent with custom storage pointing to catalog directory
-	newTorrent, _ := ct.client.AddTorrentOpt(torrent.AddTorrentOpts{
+	newTorrent, isNew := ct.client.AddTorrentOpt(torrent.AddTorrentOpts{
 		InfoHash: mi.HashInfoBytes(),
 		Storage:  catalogStorage,
 		InfoBytes: mi.InfoBytes,
 	})
 	
+	if newTorrent == nil {
+		return "", fmt.Errorf("failed to add catalog torrent to client")
+	}
+	
+	fmt.Printf("[CatalogTorrent] Added catalog torrent to client (new: %v)\n", isNew)
+	
 	// Make sure we download/seed all pieces
 	// Since files already exist locally, this will verify and start seeding
 	newTorrent.DownloadAll()
+	
+	// Check torrent status
+	stats := newTorrent.Stats()
+	fmt.Printf("[CatalogTorrent] Catalog torrent stats - Active peers: %d, Seeding: %v\n", 
+		stats.ActivePeers, newTorrent.Seeding())
 	
 	ct.torrent = newTorrent
 	ct.infoHash = newInfoHash
@@ -364,21 +412,37 @@ func (ct *CatalogTorrent) StartSeeding() error {
 			return fmt.Errorf("failed to load catalog torrent metainfo: %w", err)
 		}
 		
-		// Create storage specifically for the catalog directory
-		catalogStorage := torrentStorage.NewFile(ct.catalogDir)
+		// Create storage that puts files directly in the catalog directory
+		catalogStorage := torrentStorage.NewFileOpts(torrentStorage.NewFileClientOpts{
+			ClientBaseDir: ct.catalogDir,
+			TorrentDirMaker: func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
+				// Return the base dir itself, not a subdirectory
+				return baseDir
+			},
+		})
 		
 		// Re-add the torrent with correct storage location
-		t, _ := ct.client.AddTorrentOpt(torrent.AddTorrentOpts{
+		t, isNew := ct.client.AddTorrentOpt(torrent.AddTorrentOpts{
 			InfoHash: mi.HashInfoBytes(),
 			Storage:  catalogStorage,
 			InfoBytes: mi.InfoBytes,
 		})
 		
+		if t == nil {
+			return fmt.Errorf("failed to add catalog torrent to client")
+		}
+		
+		fmt.Printf("[CatalogTorrent] Re-added catalog torrent (new: %v)\n", isNew)
+		
 		// Start seeding
 		t.DownloadAll()
-		ct.torrent = t
 		
-		fmt.Printf("[CatalogTorrent] Started seeding catalog: %s\n", mi.HashInfoBytes().HexString())
+		// Check status
+		stats := t.Stats()
+		fmt.Printf("[CatalogTorrent] Started seeding catalog: %s (peers: %d, seeding: %v)\n", 
+			mi.HashInfoBytes().HexString(), stats.ActivePeers, t.Seeding())
+		
+		ct.torrent = t
 	}
 	return nil
 }
