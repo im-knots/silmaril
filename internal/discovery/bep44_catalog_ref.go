@@ -109,7 +109,8 @@ func (ref *BEP44CatalogRef) PublishCatalogRef(catalogInfoHash string) error {
 		return fmt.Errorf("no DHT nodes available")
 	}
 	
-	fmt.Printf("[BEP44Ref] Publishing to %d DHT nodes\n", min(5, len(nodes)))
+	// TODO: Ideally we'd use nodes closest to the target, but that method is unexported
+	fmt.Printf("[BEP44Ref] Publishing to up to %d DHT nodes\n", min(10, len(nodes)))
 	
 	// Publish to multiple nodes for redundancy
 	ctx, cancel := context.WithTimeout(ref.ctx, 30*time.Second)
@@ -117,7 +118,7 @@ func (ref *BEP44CatalogRef) PublishCatalogRef(catalogInfoHash string) error {
 	
 	published := 0
 	for i, node := range nodes {
-		if i >= 5 { // Limit to 5 nodes
+		if i >= 10 { // Publish to more nodes for better redundancy
 			break
 		}
 		
@@ -159,6 +160,19 @@ func (ref *BEP44CatalogRef) PublishCatalogRef(catalogInfoHash string) error {
 	}
 	
 	fmt.Printf("[BEP44Ref] Successfully published to %d nodes\n", published)
+	
+	// Wait a moment for the value to propagate
+	time.Sleep(2 * time.Second)
+	
+	// Verify we can fetch it back
+	fmt.Println("[BEP44Ref] Verifying catalog reference was stored...")
+	if err := ref.fetchCatalogRef(); err != nil {
+		fmt.Printf("[BEP44Ref] Warning: Could not verify catalog storage: %v\n", err)
+		// Don't fail here, as it might still propagate
+	} else {
+		fmt.Println("[BEP44Ref] Catalog reference verified successfully")
+	}
+	
 	return nil
 }
 
@@ -168,17 +182,21 @@ func (ref *BEP44CatalogRef) fetchCatalogRef() error {
 	
 	fmt.Printf("[BEP44Ref] Fetching catalog reference from DHT (target: %x)\n", target[:8])
 	
+	// Get all nodes we know about
 	nodes := ref.server.Nodes()
 	if len(nodes) == 0 {
 		return fmt.Errorf("no DHT nodes available")
 	}
 	
+	fmt.Printf("[BEP44Ref] Querying %d nodes for catalog reference\n", len(nodes))
+	
 	ctx, cancel := context.WithTimeout(ref.ctx, 30*time.Second)
 	defer cancel()
 	
-	// Query multiple nodes
-	for i, node := range nodes {
-		if i >= 10 {
+	// Query nodes closest to the target
+	queriedCount := 0
+	for _, node := range nodes {
+		if queriedCount >= 20 {
 			break
 		}
 		
@@ -188,11 +206,15 @@ func (ref *BEP44CatalogRef) fetchCatalogRef() error {
 		defer getCancel()
 		
 		result := ref.server.Get(getCtx, addr, target, nil, dht.QueryRateLimiting{})
+		queriedCount++
+		
 		if result.Err != nil {
+			fmt.Printf("[BEP44Ref] Error querying %s: %v\n", addr, result.Err)
 			continue
 		}
 		
 		if result.Reply.R == nil || result.Reply.R.V == nil {
+			// Node doesn't have the value, but this is normal
 			continue
 		}
 		
@@ -218,6 +240,7 @@ func (ref *BEP44CatalogRef) fetchCatalogRef() error {
 		// Parse the reference
 		var catalogRef CatalogReference
 		if err := json.Unmarshal(data, &catalogRef); err != nil {
+			fmt.Printf("[BEP44Ref] Failed to parse catalog reference: %v\n", err)
 			continue
 		}
 		
@@ -238,12 +261,24 @@ func (ref *BEP44CatalogRef) fetchCatalogRef() error {
 		}
 	}
 	
+	fmt.Printf("[BEP44Ref] Queried %d nodes but catalog reference not found\n", queriedCount)
 	return fmt.Errorf("catalog reference not found in DHT")
 }
 
 // RefreshCatalog checks for catalog updates from the DHT
 func (ref *BEP44CatalogRef) RefreshCatalog() error {
 	return ref.fetchCatalogRef()
+}
+
+// RepublishCatalog republishes the current catalog reference to keep it alive in DHT
+func (ref *BEP44CatalogRef) RepublishCatalog() error {
+	// If we don't have a catalog, nothing to republish
+	if ref.ref == nil || ref.ref.InfoHash == "" {
+		return fmt.Errorf("no catalog to republish")
+	}
+	
+	// Republish the current catalog reference to keep it alive
+	return ref.PublishCatalogRef(ref.ref.InfoHash)
 }
 
 // AddModel adds a model and publishes the new catalog
@@ -263,6 +298,9 @@ func (ref *BEP44CatalogRef) AddModel(name, infoHash string, size int64) error {
 	if err := ref.PublishCatalogRef(newCatalogHash); err != nil {
 		return fmt.Errorf("failed to publish catalog reference: %w", err)
 	}
+	
+	// Give the value a moment to propagate before the next operation
+	time.Sleep(2 * time.Second)
 	
 	// Start seeding the catalog
 	if err := ref.catalogTorrent.StartSeeding(); err != nil {

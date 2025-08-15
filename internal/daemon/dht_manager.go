@@ -193,6 +193,34 @@ func (dm *DHTManager) initCatalogAfterBootstrap() {
 		}
 		fmt.Println("[DHT] BEP44 catalog reference created with well-known key")
 		
+		// Add any pending announcements to the catalog
+		if len(dm.announcements) > 0 {
+			fmt.Printf("[DHT] Adding %d pending models to catalog...\n", len(dm.announcements))
+			for _, ann := range dm.announcements {
+				if err := dm.catalogRef.AddModel(ann.Name, ann.InfoHash, ann.Size); err != nil {
+					fmt.Printf("[DHT] Failed to add pending model %s to catalog: %v\n", ann.Name, err)
+				} else {
+					fmt.Printf("[DHT] Added pending model %s to catalog\n", ann.Name)
+				}
+			}
+		}
+		
+		// If we're already seeding models, make sure they're in the catalog
+		seedingModels := dm.torrentManager.GetSeedingModels()
+		if len(seedingModels) > 0 {
+			fmt.Printf("[DHT] Found %d seeding models, adding to catalog...\n", len(seedingModels))
+			for _, model := range seedingModels {
+				// Check if not already announced
+				if _, exists := dm.announcements[model.InfoHash]; !exists {
+					if err := dm.catalogRef.AddModel(model.Name, model.InfoHash, 0); err != nil {
+						fmt.Printf("[DHT] Failed to add seeding model %s to catalog: %v\n", model.Name, err)
+					} else {
+						fmt.Printf("[DHT] Added seeding model %s to catalog\n", model.Name)
+					}
+				}
+			}
+		}
+		
 		// Start periodic catalog refresh
 		go dm.periodicCatalogRefresh()
 	} else {
@@ -220,8 +248,9 @@ func (dm *DHTManager) periodicBootstrap() {
 }
 
 func (dm *DHTManager) periodicCatalogRefresh() {
-	// Check for catalog updates every 5 minutes
-	ticker := time.NewTicker(5 * time.Minute)
+	// Check for catalog updates and republish every 30 minutes to keep it alive
+	// BEP44 values expire from DHT after ~2 hours, so 30 minutes is safe
+	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
 	
 	for {
@@ -234,11 +263,19 @@ func (dm *DHTManager) periodicCatalogRefresh() {
 			dm.mu.RUnlock()
 			
 			if catalogRef != nil {
-				fmt.Println("[DHT] Checking for catalog updates...")
-				// Try to fetch the latest catalog reference from DHT
-				// This will update our local catalog if a newer version exists
+				fmt.Println("[DHT] Periodic catalog maintenance...")
+				
+				// First, check for updates from other peers
 				if err := catalogRef.RefreshCatalog(); err != nil {
 					fmt.Printf("[DHT] Failed to refresh catalog: %v\n", err)
+				}
+				
+				// Then republish our catalog reference to keep it alive in DHT
+				// This is critical - without this, the reference expires!
+				if err := catalogRef.RepublishCatalog(); err != nil {
+					fmt.Printf("[DHT] Failed to republish catalog reference: %v\n", err)
+				} else {
+					fmt.Println("[DHT] Successfully republished catalog reference to keep it alive")
 				}
 			}
 		}
@@ -264,6 +301,9 @@ func (dm *DHTManager) AnnounceModel(announcement *types.ModelAnnouncement) error
 			return fmt.Errorf("failed to add model to catalog: %w", err)
 		}
 		fmt.Printf("[DHTManager] Successfully added model %s to catalog\n", announcement.Name)
+	} else {
+		fmt.Printf("[DHTManager] WARNING: Catalog reference not yet initialized, model will be added when catalog is ready\n")
+		// The model is stored in announcements and will be added to catalog when it's initialized
 	}
 	return nil
 }
