@@ -1,0 +1,41 @@
+linters:
+  enable:
+    - deadcode
+    - ineffassign
+    - gosimple
+    - govet
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - errcheck
+    - gosec
+    - gocritic
+    - prealloc
+
+linters-settings:
+  govet:
+    enable-all: true
+    check-shadowing: true
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  gocritic:
+    enabled-checks:
+      - unlambda
+      - unslice
+      - appendCombine
+      - equalFold
+      - hugeParam
+      - rangeValCopy
+      - rangeExprCopy
+      - captLocal
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+run:
+  timeout: 5m
+  tests: true

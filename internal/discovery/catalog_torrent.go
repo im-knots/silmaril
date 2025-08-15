@@ -120,11 +120,34 @@ func (ct *CatalogTorrent) LoadOrFetchCatalog(infoHash string) error {
 	
 	fmt.Printf("[CatalogTorrent] Fetching catalog torrent: %s\n", infoHash)
 	
-	// Add magnet link
+	// Add magnet link with custom storage for catalog
 	magnetURI := fmt.Sprintf("magnet:?xt=urn:btih:%s", infoHash)
-	t, err := ct.client.AddMagnet(magnetURI)
+	
+	// Parse the infohash to get the metainfo.Hash (not needed since spec handles it)
+	// Just validate the infohash format
+	if len(infoHash) != 40 {
+		return fmt.Errorf("invalid infohash length: %d", len(infoHash))
+	}
+	
+	// Create storage that puts files directly in the catalog directory
+	catalogStorage := torrentStorage.NewFileOpts(torrentStorage.NewFileClientOpts{
+		ClientBaseDir: ct.catalogDir,
+		TorrentDirMaker: func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
+			// Return the base dir itself, not a subdirectory
+			return baseDir
+		},
+	})
+	
+	// Add torrent with custom storage
+	spec, err := torrent.TorrentSpecFromMagnetUri(magnetURI)
 	if err != nil {
-		return fmt.Errorf("failed to add catalog magnet: %w", err)
+		return fmt.Errorf("failed to parse magnet URI: %w", err)
+	}
+	spec.Storage = catalogStorage
+	
+	t, _, err := ct.client.AddTorrentSpec(spec)
+	if err != nil {
+		return fmt.Errorf("failed to add catalog torrent: %w", err)
 	}
 	
 	// First check if there are any peers for this torrent in DHT
@@ -158,7 +181,8 @@ func (ct *CatalogTorrent) LoadOrFetchCatalog(infoHash string) error {
 		select {
 		case <-t.GotInfo():
 			fmt.Printf("[CatalogTorrent] Got catalog torrent info\n")
-			return nil // Continue to download phase
+			// Break out of the metadata loop to continue to download phase
+			goto downloadPhase
 			
 		case <-ticker.C:
 			stats := t.Stats()
@@ -178,6 +202,7 @@ func (ct *CatalogTorrent) LoadOrFetchCatalog(infoHash string) error {
 		}
 	}
 	
+downloadPhase:
 	// Download the catalog
 	t.DownloadAll()
 	
