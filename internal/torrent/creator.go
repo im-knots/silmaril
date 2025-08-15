@@ -91,7 +91,7 @@ func CreateTorrentFromDirectory(sourceDir string, outputPath string, pieceLength
 	mi.CreatedBy = "Silmaril P2P"
 	mi.Comment = "Distributed via Silmaril P2P network"
 	
-	// No need to add DHT nodes here - the daemon handles all DHT operations
+	// No trackers - pure DHT for privacy
 
 	// Write to file
 	file, err := os.Create(outputPath)
