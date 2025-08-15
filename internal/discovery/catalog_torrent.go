@@ -94,12 +94,34 @@ func (ct *CatalogTorrent) LoadOrFetchCatalog(infoHash string) error {
 		return fmt.Errorf("failed to add catalog magnet: %w", err)
 	}
 	
+	// First check if there are any peers for this torrent in DHT
+	// Give it a few seconds to find peers
+	fmt.Println("[CatalogTorrent] Searching for peers in DHT...")
+	time.Sleep(5 * time.Second)
+	
+	stats := t.Stats()
+	fmt.Printf("[CatalogTorrent] Initial peer check - Active peers: %d, Total peers: %d\n", 
+		stats.ActivePeers, stats.TotalPeers)
+	
+	// If no peers found after initial search, the catalog is likely dead
+	if stats.TotalPeers == 0 {
+		fmt.Println("[CatalogTorrent] No peers found in DHT for catalog torrent")
+		t.Drop()
+		return fmt.Errorf("no seeders for catalog torrent")
+	}
+	
 	// Wait for info with timeout
 	select {
 	case <-t.GotInfo():
 		fmt.Printf("[CatalogTorrent] Got catalog torrent info\n")
 	case <-time.After(30 * time.Second):
+		// Check peers again before giving up
+		stats := t.Stats()
+		fmt.Printf("[CatalogTorrent] Timeout waiting for metadata. Peers: %d\n", stats.TotalPeers)
 		t.Drop()
+		if stats.TotalPeers == 0 {
+			return fmt.Errorf("no seeders for catalog torrent")
+		}
 		return fmt.Errorf("timeout waiting for catalog torrent metadata")
 	}
 	
@@ -114,7 +136,12 @@ func (ct *CatalogTorrent) LoadOrFetchCatalog(infoHash string) error {
 	for {
 		select {
 		case <-downloadTimeout:
+			stats := t.Stats()
+			fmt.Printf("[CatalogTorrent] Download timeout. Peers: %d, Seeders: %d\n", 
+				stats.ActivePeers, stats.ConnectedSeeders)
+			t.Drop()
 			return fmt.Errorf("timeout downloading catalog")
+			
 		case <-ticker.C:
 			if t.BytesCompleted() == t.Info().TotalLength() {
 				fmt.Printf("[CatalogTorrent] Catalog download complete\n")
@@ -155,7 +182,8 @@ func (ct *CatalogTorrent) LoadOrFetchCatalog(infoHash string) error {
 			
 			// Progress update
 			pct := float64(t.BytesCompleted()) / float64(t.Info().TotalLength()) * 100
-			fmt.Printf("[CatalogTorrent] Downloading catalog: %.1f%%\n", pct)
+			stats := t.Stats()
+			fmt.Printf("[CatalogTorrent] Downloading: %.1f%% (peers: %d)\n", pct, stats.ActivePeers)
 		}
 	}
 }
@@ -167,7 +195,13 @@ func (ct *CatalogTorrent) AddModel(name, infoHash string, size int64) (string, e
 	
 	fmt.Printf("[CatalogTorrent] Adding model to catalog: %s\n", name)
 	
-	// Add model to catalog
+	// Check if model already exists with same infohash
+	if existing, exists := ct.catalog.Models[name]; exists && existing.InfoHash == infoHash {
+		fmt.Printf("[CatalogTorrent] Model %s already in catalog with same infohash, returning existing\n", name)
+		return ct.infoHash, nil
+	}
+	
+	// Add or update model in catalog
 	ct.catalog.Models[name] = ModelEntry{
 		InfoHash: infoHash,
 		Size:     size,
@@ -200,6 +234,9 @@ func (ct *CatalogTorrent) AddModel(name, infoHash string, size int64) (string, e
 	if err != nil {
 		return "", fmt.Errorf("failed to add catalog torrent: %w", err)
 	}
+	
+	// Make sure we download/seed all pieces
+	newTorrent.DownloadAll()
 	
 	ct.torrent = newTorrent
 	ct.infoHash = newInfoHash
