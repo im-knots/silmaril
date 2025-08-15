@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
+	torrentStorage "github.com/anacrolix/torrent/storage"
 	"github.com/silmaril/silmaril/internal/storage"
 	torrentCreator "github.com/silmaril/silmaril/internal/torrent"
 	"github.com/silmaril/silmaril/pkg/types"
@@ -230,12 +232,25 @@ func (ct *CatalogTorrent) AddModel(name, infoHash string, size int64) (string, e
 		ct.torrent.Drop() // Stop seeding old version
 	}
 	
-	newTorrent, err := ct.client.AddTorrentFromFile(catalogTorrentPath)
+	// Load the torrent metainfo
+	mi, err := metainfo.LoadFromFile(catalogTorrentPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to add catalog torrent: %w", err)
+		return "", fmt.Errorf("failed to load catalog torrent metainfo: %w", err)
 	}
 	
+	// Create storage specifically for the catalog directory
+	// The catalog files are in ct.catalogDir, not in the default models dir
+	catalogStorage := torrentStorage.NewFile(ct.catalogDir)
+	
+	// Add torrent with custom storage pointing to catalog directory
+	newTorrent, _ := ct.client.AddTorrentOpt(torrent.AddTorrentOpts{
+		InfoHash: mi.HashInfoBytes(),
+		Storage:  catalogStorage,
+		InfoBytes: mi.InfoBytes,
+	})
+	
 	// Make sure we download/seed all pieces
+	// Since files already exist locally, this will verify and start seeding
 	newTorrent.DownloadAll()
 	
 	ct.torrent = newTorrent
@@ -343,12 +358,27 @@ func (ct *CatalogTorrent) saveCatalog() error {
 // StartSeeding ensures we're seeding the catalog
 func (ct *CatalogTorrent) StartSeeding() error {
 	if ct.torrent == nil && ct.torrentFile != "" {
-		// Re-add the torrent if we have one
-		t, err := ct.client.AddTorrentFromFile(ct.torrentFile)
+		// Load the torrent metainfo
+		mi, err := metainfo.LoadFromFile(ct.torrentFile)
 		if err != nil {
-			return fmt.Errorf("failed to start seeding catalog: %w", err)
+			return fmt.Errorf("failed to load catalog torrent metainfo: %w", err)
 		}
+		
+		// Create storage specifically for the catalog directory
+		catalogStorage := torrentStorage.NewFile(ct.catalogDir)
+		
+		// Re-add the torrent with correct storage location
+		t, _ := ct.client.AddTorrentOpt(torrent.AddTorrentOpts{
+			InfoHash: mi.HashInfoBytes(),
+			Storage:  catalogStorage,
+			InfoBytes: mi.InfoBytes,
+		})
+		
+		// Start seeding
+		t.DownloadAll()
 		ct.torrent = t
+		
+		fmt.Printf("[CatalogTorrent] Started seeding catalog: %s\n", mi.HashInfoBytes().HexString())
 	}
 	return nil
 }

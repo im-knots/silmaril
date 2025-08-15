@@ -168,19 +168,8 @@ func (d *Daemon) catalogRefreshWorker() {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	
-	// Do an initial refresh after a short delay to allow daemon to stabilize
-	initialDelay := 2 * time.Minute
-	fmt.Printf("[Daemon] Catalog refresh worker started, initial refresh in %v, then every %v\n", initialDelay, interval)
-	
-	select {
-	case <-d.ctx.Done():
-		return
-	case <-time.After(initialDelay):
-		fmt.Println("[Daemon] Running initial catalog refresh...")
-		if err := d.dhtManager.RefreshSeedingModels(); err != nil {
-			fmt.Printf("[Daemon] Error in initial catalog refresh: %v\n", err)
-		}
-	}
+	// The catalog is already initialized during DHT bootstrap, so we use the regular interval
+	fmt.Printf("[Daemon] Catalog refresh worker started, will refresh every %v\n", interval)
 	
 	for {
 		select {
