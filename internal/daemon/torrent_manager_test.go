@@ -67,8 +67,9 @@ func TestTorrentManagerAddTorrent(t *testing.T) {
 	err := os.WriteFile(torrentPath, torrentContent, 0644)
 	require.NoError(t, err)
 	
-	// Add torrent
-	mt, err := tm.AddTorrent(torrentPath, "test-model")
+	// Add torrent for download
+	downloadPath := filepath.Join(tmpDir, "test-model")
+	mt, err := tm.AddTorrentForDownload(torrentPath, "test-model", downloadPath)
 	
 	// Note: This will fail with invalid torrent data, but we're testing the method exists
 	if err != nil {

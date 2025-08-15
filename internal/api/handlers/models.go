@@ -1,10 +1,14 @@
 package handlers
 
 import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -151,7 +155,8 @@ func (h *Handlers) DownloadModel(c *gin.Context) {
 	
 	// Start download
 	torrentPath := filepath.Join(storage.GetTorrentsDir(), req.InfoHash+".torrent")
-	mt, err := h.daemon.GetTorrentManager().AddTorrent(torrentPath, req.ModelName)
+	downloadPath := filepath.Join(storage.GetModelsDir(), req.ModelName)
+	mt, err := h.daemon.GetTorrentManager().AddTorrentForDownload(torrentPath, req.ModelName, downloadPath)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("failed to start download: %v", err),
@@ -281,7 +286,7 @@ func (h *Handlers) ShareModel(c *gin.Context) {
 			}
 			
 			// Clone the repository
-			_, err := git.PlainClone(modelPath, false, cloneOptions)
+			repo, err := git.PlainClone(modelPath, false, cloneOptions)
 			if err != nil {
 				// Handle specific errors
 				if err == transport.ErrAuthenticationRequired {
@@ -297,6 +302,17 @@ func (h *Handlers) ShareModel(c *gin.Context) {
 			}
 			
 			fmt.Printf("[ShareModel] Repository cloned successfully to %s\n", modelPath)
+			
+			// Download LFS files if present
+			if !req.SkipLFS {
+				fmt.Printf("[ShareModel] Checking for LFS files...\n")
+				if err := downloadLFSFiles(repo, modelPath, cloneOptions.Auth); err != nil {
+					fmt.Printf("[ShareModel] Warning: Failed to download LFS files: %v\n", err)
+					// Continue anyway - some files might not need LFS
+				} else {
+					fmt.Printf("[ShareModel] LFS files downloaded successfully\n")
+				}
+			}
 			
 			// Remove .git directory to save space
 			gitDir := filepath.Join(modelPath, ".git")
@@ -370,7 +386,7 @@ func (h *Handlers) ShareModel(c *gin.Context) {
 			
 			// Start sharing the model
 			torrentManager := h.daemon.GetTorrentManager()
-			managedTorrent, err := torrentManager.AddTorrent(torrentPath, modelName)
+			managedTorrent, err := torrentManager.AddTorrentForSeeding(torrentPath, modelName, modelPath)
 			if err != nil {
 				fmt.Printf("[ShareModel] Failed to add torrent: %v\n", err)
 				return
@@ -448,7 +464,8 @@ func (h *Handlers) ShareModel(c *gin.Context) {
 			
 			// Add torrent to torrent manager
 			torrentManager := h.daemon.GetTorrentManager()
-			managedTorrent, err := torrentManager.AddTorrent(torrentPath, filepath.Join(paths.ModelsDir(), manifest.Name))
+			modelPath := filepath.Join(paths.ModelsDir(), manifest.Name)
+			managedTorrent, err := torrentManager.AddTorrentForSeeding(torrentPath, manifest.Name, modelPath)
 			if err != nil {
 				errors = append(errors, fmt.Sprintf("%s: %v", manifest.Name, err))
 				continue
@@ -684,7 +701,7 @@ func (h *Handlers) ShareModel(c *gin.Context) {
 		// Add torrent to torrent manager for seeding
 		tm := h.daemon.GetTorrentManager()
 		fmt.Printf("[ShareModel] Adding torrent to torrent manager\n")
-		managedTorrent, err := tm.AddTorrent(torrentPath, req.Name)
+		managedTorrent, err := tm.AddTorrentForSeeding(torrentPath, req.Name, modelPath)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": fmt.Sprintf("failed to add torrent: %v", err),
@@ -780,6 +797,228 @@ func parseRepoURL(repoURL string) string {
 	}
 	
 	return ""
+}
+
+// downloadLFSFiles downloads Git LFS files in the repository
+func downloadLFSFiles(repo *git.Repository, repoPath string, auth transport.AuthMethod) error {
+	// First, check if git-lfs is installed
+	if _, err := exec.LookPath("git-lfs"); err != nil {
+		fmt.Printf("[LFS] git-lfs not found in PATH, trying to download LFS files manually\n")
+		return downloadLFSFilesManually(repo, repoPath, auth)
+	}
+	
+	// Use git-lfs to pull files
+	fmt.Printf("[LFS] Using git-lfs to pull LFS files\n")
+	cmd := exec.Command("git", "lfs", "pull")
+	cmd.Dir = repoPath
+	
+	// Set up authentication if provided
+	if auth != nil {
+		if basicAuth, ok := auth.(*githttp.BasicAuth); ok {
+			cmd.Env = append(os.Environ(),
+				fmt.Sprintf("GIT_ASKPASS=echo"),
+				fmt.Sprintf("GIT_USERNAME=%s", basicAuth.Username),
+				fmt.Sprintf("GIT_PASSWORD=%s", basicAuth.Password),
+			)
+		}
+	}
+	
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git lfs pull failed: %v, output: %s", err, output)
+	}
+	
+	fmt.Printf("[LFS] git-lfs pull output: %s\n", output)
+	return nil
+}
+
+// downloadLFSFilesManually downloads LFS files without git-lfs command
+func downloadLFSFilesManually(repo *git.Repository, repoPath string, auth transport.AuthMethod) error {
+	// Find all LFS pointer files
+	lfsFiles := make(map[string]*LFSPointer)
+	
+	err := filepath.Walk(repoPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		
+		// Skip directories and .git folder
+		if info.IsDir() || strings.Contains(path, ".git") {
+			return nil
+		}
+		
+		// Check if file is an LFS pointer
+		if pointer := parseLFSPointer(path); pointer != nil {
+			lfsFiles[path] = pointer
+		}
+		
+		return nil
+	})
+	
+	if err != nil {
+		return fmt.Errorf("failed to walk repository: %v", err)
+	}
+	
+	if len(lfsFiles) == 0 {
+		fmt.Printf("[LFS] No LFS files found\n")
+		return nil
+	}
+	
+	fmt.Printf("[LFS] Found %d LFS pointer files\n", len(lfsFiles))
+	
+	// Get the remote URL
+	remotes, err := repo.Remotes()
+	if err != nil || len(remotes) == 0 {
+		return fmt.Errorf("no remotes configured")
+	}
+	
+	remoteURL := remotes[0].Config().URLs[0]
+	lfsURL := getLFSEndpoint(remoteURL)
+	
+	// Download each LFS file
+	for filePath, pointer := range lfsFiles {
+		fmt.Printf("[LFS] Downloading %s (%.2f MB)\n", filePath, float64(pointer.Size)/(1024*1024))
+		
+		if err := downloadLFSObject(lfsURL, pointer, filePath, auth); err != nil {
+			fmt.Printf("[LFS] Failed to download %s: %v\n", filePath, err)
+			// Continue with other files
+		}
+	}
+	
+	return nil
+}
+
+// LFSPointer represents a Git LFS pointer file
+type LFSPointer struct {
+	OID  string
+	Size int64
+}
+
+// parseLFSPointer checks if a file is an LFS pointer and parses it
+func parseLFSPointer(filePath string) *LFSPointer {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	
+	// LFS pointer files are small (< 1KB)
+	info, err := file.Stat()
+	if err != nil || info.Size() > 1024 {
+		return nil
+	}
+	
+	scanner := bufio.NewScanner(file)
+	var pointer LFSPointer
+	hasVersion := false
+	
+	for scanner.Scan() {
+		line := scanner.Text()
+		
+		if line == "version https://git-lfs.github.com/spec/v1" {
+			hasVersion = true
+		} else if strings.HasPrefix(line, "oid sha256:") {
+			pointer.OID = strings.TrimPrefix(line, "oid sha256:")
+		} else if strings.HasPrefix(line, "size ") {
+			fmt.Sscanf(line, "size %d", &pointer.Size)
+		}
+	}
+	
+	if hasVersion && pointer.OID != "" && pointer.Size > 0 {
+		return &pointer
+	}
+	
+	return nil
+}
+
+// getLFSEndpoint converts a git remote URL to an LFS endpoint
+func getLFSEndpoint(remoteURL string) string {
+	// For GitHub
+	if strings.Contains(remoteURL, "github.com") {
+		// Convert git@github.com:user/repo.git to https://github.com/user/repo.git
+		if strings.HasPrefix(remoteURL, "git@") {
+			remoteURL = strings.Replace(remoteURL, "git@github.com:", "https://github.com/", 1)
+		}
+		remoteURL = strings.TrimSuffix(remoteURL, ".git")
+		return remoteURL + ".git/info/lfs"
+	}
+	
+	// For HuggingFace
+	if strings.Contains(remoteURL, "huggingface.co") {
+		remoteURL = strings.TrimSuffix(remoteURL, ".git")
+		return remoteURL + ".git/info/lfs"
+	}
+	
+	// Generic Git LFS endpoint
+	return strings.TrimSuffix(remoteURL, "/") + "/info/lfs"
+}
+
+// downloadLFSObject downloads a single LFS object
+func downloadLFSObject(lfsEndpoint string, pointer *LFSPointer, filePath string, auth transport.AuthMethod) error {
+	// Construct download URL
+	// For simplicity, try direct download first (works for public repos)
+	downloadURL := fmt.Sprintf("%s/objects/%s", lfsEndpoint, pointer.OID)
+	
+	req, err := http.NewRequest("GET", downloadURL, nil)
+	if err != nil {
+		return err
+	}
+	
+	// Add authentication if provided
+	if auth != nil {
+		if basicAuth, ok := auth.(*githttp.BasicAuth); ok {
+			req.SetBasicAuth(basicAuth.Username, basicAuth.Password)
+		}
+	}
+	
+	req.Header.Set("Accept", "application/vnd.git-lfs+json")
+	
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		// Try batch API for authenticated downloads
+		return downloadLFSObjectBatch(lfsEndpoint, pointer, filePath, auth)
+	}
+	
+	// Download to temporary file first
+	tmpFile := filePath + ".tmp"
+	out, err := os.Create(tmpFile)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	
+	// Download and verify SHA256
+	hasher := sha256.New()
+	writer := io.MultiWriter(out, hasher)
+	
+	_, err = io.Copy(writer, resp.Body)
+	if err != nil {
+		os.Remove(tmpFile)
+		return err
+	}
+	
+	// Verify OID
+	computedOID := hex.EncodeToString(hasher.Sum(nil))
+	if computedOID != pointer.OID {
+		os.Remove(tmpFile)
+		return fmt.Errorf("OID mismatch: expected %s, got %s", pointer.OID, computedOID)
+	}
+	
+	// Replace pointer file with actual content
+	return os.Rename(tmpFile, filePath)
+}
+
+// downloadLFSObjectBatch uses the batch API for authenticated downloads
+func downloadLFSObjectBatch(lfsEndpoint string, pointer *LFSPointer, filePath string, auth transport.AuthMethod) error {
+	// This is a simplified version - full implementation would use the batch API
+	// For now, return an error suggesting to use git-lfs
+	return fmt.Errorf("authenticated LFS download requires git-lfs command")
 }
 
 // copyDir recursively copies a directory

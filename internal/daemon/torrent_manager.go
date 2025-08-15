@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
+	torrentStorage "github.com/anacrolix/torrent/storage"
 	"github.com/silmaril/silmaril/internal/config"
 	"github.com/silmaril/silmaril/internal/storage"
 	torrentclient "github.com/silmaril/silmaril/internal/torrent"
@@ -34,7 +36,7 @@ type ManagedTorrent struct {
 func NewTorrentManager(cfg *config.Config, state *State) (*TorrentManager, error) {
 	// Create a persistent torrent client
 	clientCfg := torrent.NewDefaultClientConfig()
-	clientCfg.DataDir = storage.GetModelsDir()
+	// Don't set a global DataDir - we'll use custom storage for each torrent
 	clientCfg.DisableTrackers = cfg.GetBool("network.disable_trackers")
 	clientCfg.DisableWebtorrent = cfg.GetBool("network.disable_webtorrent")
 	clientCfg.DisablePEX = cfg.GetBool("network.disable_pex")
@@ -71,14 +73,40 @@ func NewTorrentManager(cfg *config.Config, state *State) (*TorrentManager, error
 
 func (tm *TorrentManager) restoreTorrents() error {
 	torrentsDir := storage.GetTorrentsDir()
+	modelsDir := storage.GetModelsDir()
 	
 	// Load all torrents that were active in the previous session
 	for _, torrentInfo := range tm.state.ActiveTorrents {
 		torrentPath := filepath.Join(torrentsDir, torrentInfo.InfoHash+".torrent")
 		
-		t, err := tm.client.AddTorrentFromFile(torrentPath)
+		// Load torrent metainfo
+		mi, err := metainfo.LoadFromFile(torrentPath)
 		if err != nil {
-			fmt.Printf("Failed to restore torrent %s: %v\n", torrentInfo.Name, err)
+			fmt.Printf("Failed to load torrent metainfo %s: %v\n", torrentInfo.Name, err)
+			continue
+		}
+
+		// Determine storage path based on torrent name
+		storagePath := filepath.Join(modelsDir, torrentInfo.Name)
+		
+		// Create custom storage pointing to the specific directory
+		customStorage := torrentStorage.NewFileOpts(torrentStorage.NewFileClientOpts{
+			ClientBaseDir: storagePath,
+			TorrentDirMaker: func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
+				// Return the base dir itself
+				return baseDir
+			},
+		})
+
+		// Add torrent with custom storage
+		t, _ := tm.client.AddTorrentOpt(torrent.AddTorrentOpts{
+			InfoHash:  mi.HashInfoBytes(),
+			Storage:   customStorage,
+			InfoBytes: mi.InfoBytes,
+		})
+
+		if t == nil {
+			fmt.Printf("Failed to restore torrent %s\n", torrentInfo.Name)
 			continue
 		}
 
@@ -104,14 +132,98 @@ func (tm *TorrentManager) restoreTorrents() error {
 	return nil
 }
 
-func (tm *TorrentManager) AddTorrent(torrentPath string, name string) (*ManagedTorrent, error) {
+// AddTorrentForSeeding adds a torrent specifically for seeding (sharing models)
+// storagePath is the directory where the torrent's files are located
+func (tm *TorrentManager) AddTorrentForSeeding(torrentPath string, name string, storagePath string) (*ManagedTorrent, error) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
-	t, err := tm.client.AddTorrentFromFile(torrentPath)
+	fmt.Printf("[TorrentManager] Adding torrent for seeding: %s from %s\n", name, storagePath)
+
+	// Load torrent metainfo
+	mi, err := metainfo.LoadFromFile(torrentPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to add torrent: %w", err)
+		return nil, fmt.Errorf("failed to load torrent metainfo: %w", err)
 	}
+
+	// Create custom storage pointing to the specific directory
+	customStorage := torrentStorage.NewFileOpts(torrentStorage.NewFileClientOpts{
+		ClientBaseDir: storagePath,
+		TorrentDirMaker: func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
+			// Return the base dir itself since files are already in the right place
+			return baseDir
+		},
+	})
+
+	// Add torrent with custom storage
+	t, isNew := tm.client.AddTorrentOpt(torrent.AddTorrentOpts{
+		InfoHash:  mi.HashInfoBytes(),
+		Storage:   customStorage,
+		InfoBytes: mi.InfoBytes,
+	})
+
+	if t == nil {
+		return nil, fmt.Errorf("failed to add torrent to client")
+	}
+
+	fmt.Printf("[TorrentManager] Torrent added to client (new: %v)\n", isNew)
+
+	// For seeding, we call DownloadAll() to verify existing pieces
+	// The torrent client will automatically start seeding once verification is complete
+	t.DownloadAll()
+
+	mt := &ManagedTorrent{
+		InfoHash: t.InfoHash().String(),
+		Name:     name,
+		Torrent:  t,
+		AddedAt:  time.Now(),
+		Seeding:  true, // Explicitly mark as seeding
+	}
+
+	tm.torrents[mt.InfoHash] = mt
+	
+	// Update state
+	tm.state.AddTorrent(mt.InfoHash, name, mt.AddedAt, true)
+	
+	fmt.Printf("[TorrentManager] Torrent added for seeding: %s (InfoHash: %s)\n", name, mt.InfoHash)
+	return mt, nil
+}
+
+// AddTorrentForDownload adds a torrent specifically for downloading (getting models)
+// storagePath is the directory where the torrent's files will be downloaded to
+func (tm *TorrentManager) AddTorrentForDownload(torrentPath string, name string, storagePath string) (*ManagedTorrent, error) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	fmt.Printf("[TorrentManager] Adding torrent for download: %s to %s\n", name, storagePath)
+
+	// Load torrent metainfo
+	mi, err := metainfo.LoadFromFile(torrentPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load torrent metainfo: %w", err)
+	}
+
+	// Create custom storage pointing to the specific directory
+	customStorage := torrentStorage.NewFileOpts(torrentStorage.NewFileClientOpts{
+		ClientBaseDir: storagePath,
+		TorrentDirMaker: func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
+			// Return the base dir itself to download files directly there
+			return baseDir
+		},
+	})
+
+	// Add torrent with custom storage
+	t, isNew := tm.client.AddTorrentOpt(torrent.AddTorrentOpts{
+		InfoHash:  mi.HashInfoBytes(),
+		Storage:   customStorage,
+		InfoBytes: mi.InfoBytes,
+	})
+
+	if t == nil {
+		return nil, fmt.Errorf("failed to add torrent to client")
+	}
+
+	fmt.Printf("[TorrentManager] Torrent added to client (new: %v)\n", isNew)
 
 	// Start downloading
 	t.DownloadAll()
@@ -121,7 +233,7 @@ func (tm *TorrentManager) AddTorrent(torrentPath string, name string) (*ManagedT
 		Name:     name,
 		Torrent:  t,
 		AddedAt:  time.Now(),
-		Seeding:  false,
+		Seeding:  false, // Explicitly mark as downloading
 	}
 
 	tm.torrents[mt.InfoHash] = mt
@@ -129,8 +241,10 @@ func (tm *TorrentManager) AddTorrent(torrentPath string, name string) (*ManagedT
 	// Update state
 	tm.state.AddTorrent(mt.InfoHash, name, mt.AddedAt, false)
 	
+	fmt.Printf("[TorrentManager] Torrent added for download: %s (InfoHash: %s)\n", name, mt.InfoHash)
 	return mt, nil
 }
+
 
 func (tm *TorrentManager) RemoveTorrent(infoHash string) error {
 	tm.mu.Lock()
@@ -201,6 +315,12 @@ func (tm *TorrentManager) StopSeeding(infoHash string) error {
 	mt.Torrent.DisallowDataUpload()
 	
 	return nil
+}
+
+func (tm *TorrentManager) GetManagedTorrent(infoHash string) *ManagedTorrent {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.torrents[infoHash]
 }
 
 func (tm *TorrentManager) GetStats(infoHash string) (map[string]interface{}, error) {

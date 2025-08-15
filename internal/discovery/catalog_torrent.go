@@ -139,7 +139,7 @@ func (ct *CatalogTorrent) LoadOrFetchCatalog(infoHash string) error {
 	// If no peers found after initial search, the catalog is likely dead
 	if stats.TotalPeers == 0 {
 		fmt.Println("[CatalogTorrent] No peers found in DHT for catalog torrent")
-		t.Drop()
+		t.Drop() // Remove from torrent client
 		return fmt.Errorf("no seeders for catalog torrent")
 	}
 	

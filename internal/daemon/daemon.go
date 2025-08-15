@@ -267,24 +267,63 @@ func (d *Daemon) reportSeedingStatus() {
 	fmt.Printf("[Seeding Status] Total torrents: %d\n", len(torrents))
 	
 	seedingCount := 0
+	downloadingCount := 0
 	for _, t := range torrents {
-		if t.Seeding() {
-			seedingCount++
-			stats := t.Stats()
-			name := t.Name()
-			if name == "" {
-				// For catalog torrents with no name
+		stats := t.Stats()
+		name := t.Name()
+		infoHash := t.InfoHash().HexString()
+		
+		// Try to identify the torrent type
+		if name == "" {
+			// Check if this is a known model torrent
+			if mt := d.torrentManager.GetManagedTorrent(infoHash); mt != nil {
+				name = mt.Name
+			} else {
+				// Assume it's a catalog if no name
 				name = "catalog"
 			}
-			fmt.Printf("[Seeding Status] • %s: %s (peers: %d, uploaded: %s)\n",
+		}
+		
+		// Determine actual status
+		if t.Info() == nil {
+			// Still getting metadata
+			fmt.Printf("[Seeding Status] • %s: %s (GETTING METADATA, peers: %d)\n",
 				name,
-				t.InfoHash().HexString()[:8],
+				infoHash[:8],
+				stats.TotalPeers)
+		} else if t.BytesCompleted() < t.Length() {
+			// Check if this is a managed torrent that we're supposed to be seeding
+			managedTorrent := d.torrentManager.GetManagedTorrent(infoHash)
+			if managedTorrent != nil && managedTorrent.Seeding {
+				// We're supposed to be seeding but verification isn't complete
+				seedingCount++
+				pct := float64(t.BytesCompleted()) * 100.0 / float64(t.Length())
+				fmt.Printf("[Seeding Status] • %s: %s (VERIFYING %.1f%%, will seed)\n",
+					name,
+					infoHash[:8],
+					pct)
+			} else {
+				// Actually downloading
+				downloadingCount++
+				pct := float64(t.BytesCompleted()) * 100.0 / float64(t.Length())
+				fmt.Printf("[Seeding Status] • %s: %s (DOWNLOADING %.1f%%, peers: %d)\n",
+					name,
+					infoHash[:8],
+					pct,
+					stats.ActivePeers)
+			}
+		} else if t.Seeding() {
+			// Actually seeding (have all data)
+			seedingCount++
+			fmt.Printf("[Seeding Status] • %s: %s (SEEDING, peers: %d, uploaded: %s)\n",
+				name,
+				infoHash[:8],
 				stats.ActivePeers,
 				formatBytes(stats.BytesWrittenData.Int64()))
 		}
 	}
 	
-	fmt.Printf("[Seeding Status] Currently seeding: %d torrents\n", seedingCount)
+	fmt.Printf("[Seeding Status] Summary - Seeding: %d, Downloading: %d\n", seedingCount, downloadingCount)
 	
 	// Also report catalog status specifically
 	// (The catalog torrent should be in the torrents list above)
