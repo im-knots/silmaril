@@ -133,8 +133,8 @@ func (ct *CatalogTorrent) LoadOrFetchCatalog(infoHash string) error {
 	time.Sleep(5 * time.Second)
 	
 	stats := t.Stats()
-	fmt.Printf("[CatalogTorrent] Initial peer check - Active peers: %d, Total peers: %d\n", 
-		stats.ActivePeers, stats.TotalPeers)
+	fmt.Printf("[CatalogTorrent] Initial peer check - Active peers: %d, Total peers: %d, Known swarm: %d\n", 
+		stats.ActivePeers, stats.TotalPeers, len(t.KnownSwarm()))
 	
 	// If no peers found after initial search, the catalog is likely dead
 	if stats.TotalPeers == 0 {
@@ -144,18 +144,32 @@ func (ct *CatalogTorrent) LoadOrFetchCatalog(infoHash string) error {
 	}
 	
 	// Wait for info with timeout
-	select {
-	case <-t.GotInfo():
-		fmt.Printf("[CatalogTorrent] Got catalog torrent info\n")
-	case <-time.After(30 * time.Second):
-		// Check peers again before giving up
-		stats := t.Stats()
-		fmt.Printf("[CatalogTorrent] Timeout waiting for metadata. Peers: %d\n", stats.TotalPeers)
-		t.Drop()
-		if stats.TotalPeers == 0 {
-			return fmt.Errorf("no seeders for catalog torrent")
+	metadataTimeout := time.After(30 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-t.GotInfo():
+			fmt.Printf("[CatalogTorrent] Got catalog torrent info\n")
+			return nil // Continue to download phase
+			
+		case <-ticker.C:
+			stats := t.Stats()
+			fmt.Printf("[CatalogTorrent] Waiting for metadata - Active: %d, Half-open: %d, Total peers: %d\n", 
+				stats.ActivePeers, stats.HalfOpenPeers, stats.TotalPeers)
+			
+		case <-metadataTimeout:
+			// Check peers again before giving up
+			stats := t.Stats()
+			fmt.Printf("[CatalogTorrent] Timeout waiting for metadata. Active: %d, Total peers: %d\n", 
+				stats.ActivePeers, stats.TotalPeers)
+			t.Drop()
+			if stats.TotalPeers == 0 {
+				return fmt.Errorf("no seeders for catalog torrent")
+			}
+			return fmt.Errorf("timeout waiting for catalog torrent metadata")
 		}
-		return fmt.Errorf("timeout waiting for catalog torrent metadata")
 	}
 	
 	// Download the catalog
@@ -163,8 +177,8 @@ func (ct *CatalogTorrent) LoadOrFetchCatalog(infoHash string) error {
 	
 	// Wait for completion with timeout
 	downloadTimeout := time.After(60 * time.Second)
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	downloadTicker := time.NewTicker(1 * time.Second)
+	defer downloadTicker.Stop()
 	
 	for {
 		select {
@@ -175,7 +189,7 @@ func (ct *CatalogTorrent) LoadOrFetchCatalog(infoHash string) error {
 			t.Drop()
 			return fmt.Errorf("timeout downloading catalog")
 			
-		case <-ticker.C:
+		case <-downloadTicker.C:
 			if t.BytesCompleted() == t.Info().TotalLength() {
 				fmt.Printf("[CatalogTorrent] Catalog download complete\n")
 				
@@ -296,10 +310,12 @@ func (ct *CatalogTorrent) AddModel(name, infoHash string, size int64) (string, e
 	// Since files already exist locally, this will verify and start seeding
 	newTorrent.DownloadAll()
 	
+	// The torrent client will automatically announce to DHT
+	
 	// Check torrent status
 	stats := newTorrent.Stats()
-	fmt.Printf("[CatalogTorrent] Catalog torrent stats - Active peers: %d, Seeding: %v\n", 
-		stats.ActivePeers, newTorrent.Seeding())
+	fmt.Printf("[CatalogTorrent] Catalog torrent stats - Active peers: %d, Seeding: %v, DHT nodes: %d\n", 
+		stats.ActivePeers, newTorrent.Seeding(), len(newTorrent.KnownSwarm()))
 	
 	ct.torrent = newTorrent
 	ct.infoHash = newInfoHash
