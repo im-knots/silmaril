@@ -133,8 +133,14 @@ func (ct *CatalogTorrent) LoadOrFetchCatalog(infoHash string) error {
 	time.Sleep(5 * time.Second)
 	
 	stats := t.Stats()
+	knownPeers := t.KnownSwarm()
 	fmt.Printf("[CatalogTorrent] Initial peer check - Active peers: %d, Total peers: %d, Known swarm: %d\n", 
-		stats.ActivePeers, stats.TotalPeers, len(t.KnownSwarm()))
+		stats.ActivePeers, stats.TotalPeers, len(knownPeers))
+	
+	// Log peer details for debugging
+	for _, peer := range knownPeers {
+		fmt.Printf("[CatalogTorrent] Found peer: %s\n", peer.Addr)
+	}
 	
 	// If no peers found after initial search, the catalog is likely dead
 	if stats.TotalPeers == 0 {

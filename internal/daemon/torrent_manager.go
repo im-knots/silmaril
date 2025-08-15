@@ -38,8 +38,10 @@ func NewTorrentManager(cfg *config.Config, state *State) (*TorrentManager, error
 	clientCfg := torrent.NewDefaultClientConfig()
 	// Don't set a global DataDir - we'll use custom storage for each torrent
 	clientCfg.DisableTrackers = cfg.GetBool("network.disable_trackers")
-	clientCfg.DisableWebtorrent = cfg.GetBool("network.disable_webtorrent")
-	clientCfg.DisablePEX = cfg.GetBool("network.disable_pex")
+	// Enable WebTorrent for better NAT traversal
+	clientCfg.DisableWebtorrent = false
+	// Enable PEX for better peer discovery
+	clientCfg.DisablePEX = false
 	clientCfg.ListenPort = cfg.GetInt("network.listen_port")
 	clientCfg.Seed = true
 	
